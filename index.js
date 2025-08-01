@@ -4,6 +4,9 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const Database = require('./classes/database.js');
 const multer = require('multer');
+const bcrypt = require('bcrypt');
+
+const db = new Database();
 
 // Aanmaken van een express app
 const app = express();
@@ -45,80 +48,82 @@ app.get('/', (req, res) => {
   res.send('Hello World!');
 });
 
+// ALLES HIERBOVEN LATEN STAAN!!
+
+// USER ACCOUNT ENDPOINTS:
+// registration endpoint
+app.post('/api/register', upload.array('pictures', 5), async (req, res) => {
+  const connection = await db.connect();
+  try {
+    const { firstName, dob, city, gender, email, phone, password } = req.body;
+
+    // age check: must be 18+
+    const birth = new Date(dob);
+    const ageMs = Date.now() - birth.getTime();
+    const age = Math.abs(new Date(ageMs).getUTCFullYear() - 1970);
+    if (age < 18) {
+      return res.status(400).json({ error: 'You have to be at least 18 years to swipe.' });
+    }
+
+   // helper: map a gender name to its ID in Gender table
+    async function getGenderId(genderName, connection) {
+      const [rows] = await connection.execute(
+        'SELECT ID FROM Gender WHERE Name = ?',
+        [genderName]
+      );
+      if (rows.length) return rows[0].ID;
+      throw new Error(`Unknown gender option: ${genderName}`);
+    } 
+
+    // lookup gender ID
+    const genderId = await getGenderId(gender, connection);
+
+    // Password hashing
+    if (!password || password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+    }
+    const saltRounds = 10;
+    const passwordHash = await bcrypt.hash(password, saltRounds);
+
+    // insert into User table
+    const [userResult] = await connection.execute(
+      `INSERT INTO \`User\`
+         (Username, DateOfBirth, Location, Email, PhoneNumber, GenderID, Password)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [ firstName, dob, city, email || null, phone || null, genderId, passwordHash ]
+    );
+    const userId = userResult.insertId;
+
+    // insert uploaded pictures into Pictures table
+    await Promise.all(req.files.map((file, idx) => {
+      const imageUrl = `/uploads/${file.filename}`;
+      return connection.execute(
+        `INSERT INTO Pictures
+           (Picture, UserID, IsProfilePicture)
+         VALUES (?, ?, ?)`,
+        [ imageUrl, userId, idx === 0 ? 1 : 0 ]
+      );
+    }));
+
+    // success
+    return res.status(201).json({ message: 'Gebruiker succesvol geregistreerd.' });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: err.message });
+  } finally {
+    await connection.end();
+  }
+});
+
+
+
+
+
+
+
 // Starten van de server en op welke port de server moet luisteren, NIET VERWIJDEREN
 app.listen(3000, () => {
   console.log('Server is running on port 3000');
 });
-
-// ALLES HIERBOVEN LATEN STAAN!!
-
-// USERS:
-// API Route to Fetch User by ID (TEST)
-app.get('/api/user', async (req, res) => {
-  const userId = req.query.id;
-
-  const db = new Database();
-  
-  try {
-      const [user] = await db.getQuery(
-          `SELECT 
-              u.ID, u.Username, u.DateOfBirth, u.Email, u.PhoneNumber, 
-              u.Bio, g.Name AS Gender, u.Location, u.Active, u.Verified, 
-              u.MinAge, u.MaxAge 
-          FROM User u
-          LEFT JOIN Gender g ON u.GenderID = g.ID
-          WHERE u.ID = ?`, 
-          [userId]
-      );
-
-      if (user === undefined) {
-          return res.status(404).json({ error: "User not found" });
-      }
-
-      res.json(user); // Return user data
-  } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: "Database error" });
-  }
-});
-
-//2. User inloggen
-app.post('/api/login', (req, res) => {
-  const { email, password } = req.body;
-  const db = new Database();
-
-  db.getQuery('SELECT * FROM User WHERE Email = ?', [email])
-    .then((users) => {
-      if (users.length === 0) {
-        return res.status(401).send({ error: 'Invalid email or password' });
-      }
-
-      const user = users[0];
-
-      // Compare passwords
-      if (user.Password !== password) {  // Note: using user.Password instead of User.Password
-        return res.status(401).send({ error: 'Invalid email or password' });
-      }
-
-      // Successful login response
-      res.status(200).send({
-        message: 'Login successful',
-        userId: user.ID,
-        userType: user.UserType
-      });
-    })
-    .catch((error) => {
-      console.error('Login error:', error); // Add error logging
-      res.status(500).send({ error: 'Failed to log in', details: error });
-    });
-});
-
-
-
-
-
-
-
-
-
   
