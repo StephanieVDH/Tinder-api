@@ -174,6 +174,66 @@ app.get('/api/admin/users', async (req, res) => {
   }
 });
 
+// 2. Ban users
+app.put('/api/admin/users/:id/ban', async (req, res) => {
+  const userId = req.params.id;
+  const connection = await db.connect();
+  try {
+    const [rows] = await connection.execute(
+      'SELECT Active FROM User WHERE ID = ?',
+      [userId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const currentStatus = rows[0].Active;
+    const newStatus = !currentStatus;
+
+    await connection.execute(
+      'UPDATE User SET Active = ? WHERE ID = ?',
+      [newStatus, userId]
+    );
+
+    res.json({ message: `User ${newStatus ? 'unbanned' : 'banned'}`, active: newStatus });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to update user status' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 3. Verify users
+app.put('/api/admin/users/:id/verify', async (req, res) => {
+  const userId = req.params.id;
+  const connection = await db.connect();
+  try {
+    const [rows] = await connection.execute(
+      'SELECT Verified FROM User WHERE ID = ?',
+      [userId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const currentStatus = rows[0].Verified;
+    const newStatus = !currentStatus;
+
+    await connection.execute(
+      'UPDATE User SET Verified = ? WHERE ID = ?',
+      [newStatus, userId]
+    );
+
+    res.json({ message: `User ${newStatus ? 'verified' : 'unverified'}`, verified: newStatus });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to update verification status' });
+  } finally {
+    await connection.end();
+  }
+});
+
 
 
 
