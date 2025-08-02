@@ -51,7 +51,7 @@ app.get('/', (req, res) => {
 // ALLES HIERBOVEN LATEN STAAN!!
 
 // USER ACCOUNT ENDPOINTS:
-// registration endpoint
+// 1. registration endpoint
 app.post('/api/register', upload.array('pictures', 5), async (req, res) => {
   const connection = await db.connect();
   try {
@@ -107,6 +107,46 @@ app.post('/api/register', upload.array('pictures', 5), async (req, res) => {
 
     // success
     return res.status(201).json({ message: 'Gebruiker succesvol geregistreerd.' });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: err.message });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 2. login endpoint
+app.post('/api/login', async (req, res) => {
+  const connection = await db.connect();
+  try {
+    const { email, password } = req.body;
+
+    // Validate input
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required.' });
+    }
+
+    // Fetch user by email
+    const [rows] = await connection.execute(
+      'SELECT ID, Password FROM `User` WHERE Email = ?',
+      [email]
+    );
+
+    if (rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid email or password.' });
+    }
+
+    const user = rows[0];
+
+    // Verify password
+    const isMatch = await bcrypt.compare(password, user.Password);
+    if (!isMatch) {
+      return res.status(401).json({ error: 'Invalid email or password.' });
+    }
+
+    // Success
+    return res.status(200).json({ message: 'Login successful.', userId: user.ID });
 
   } catch (err) {
     console.error(err);
