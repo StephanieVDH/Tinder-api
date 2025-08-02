@@ -55,7 +55,7 @@ app.get('/', (req, res) => {
 app.post('/api/register', upload.array('pictures', 5), async (req, res) => {
   const connection = await db.connect();
   try {
-    const { firstName, dob, city, gender, email, phone, password } = req.body;
+    const { firstName, dob, gender, email, password } = req.body;
 
     // age check: must be 18+
     const birth = new Date(dob);
@@ -88,9 +88,9 @@ app.post('/api/register', upload.array('pictures', 5), async (req, res) => {
     // insert into User table
     const [userResult] = await connection.execute(
       `INSERT INTO \`User\`
-         (Username, DateOfBirth, Location, Email, PhoneNumber, GenderID, Password)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [ firstName, dob, city, email || null, phone || null, genderId, passwordHash ]
+         (Username, DateOfBirth, Email, GenderID, Password)
+       VALUES (?, ?, ?, ?, ?)`,
+      [ firstName, dob, email, genderId, passwordHash ]
     );
     const userId = userResult.insertId;
 
@@ -106,7 +106,7 @@ app.post('/api/register', upload.array('pictures', 5), async (req, res) => {
     }));
 
     // success
-    return res.status(201).json({ message: 'Gebruiker succesvol geregistreerd.' });
+    return res.status(201).json({ message: 'Success!' });
 
   } catch (err) {
     console.error(err);
@@ -151,6 +151,24 @@ app.post('/api/login', async (req, res) => {
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: err.message });
+  } finally {
+    await connection.end();
+  }
+});
+
+
+// ADMIN ENDPOINTS:
+// 1. User overview
+app.get('/api/admin/users', async (req, res) => {
+  const connection = await db.connect();
+  try {
+    const [rows] = await connection.execute(
+      'SELECT ID, Username, Email, Role, Active, Verified, CreatedAt FROM User'
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch users' });
   } finally {
     await connection.end();
   }
