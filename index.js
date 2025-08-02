@@ -234,6 +234,28 @@ app.put('/api/admin/users/:id/verify', async (req, res) => {
   }
 });
 
+// 4. Delete users
+app.delete('/api/admin/users/:id', async (req, res) => {
+  const userId = req.params.id;
+  const connection = await db.connect();
+  try {
+    const [result] = await connection.execute(
+      'DELETE FROM User WHERE ID = ?',
+      [userId]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ message: 'User deleted' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to delete user' });
+  } finally {
+    await connection.end();
+  }
+});
 
 
 
