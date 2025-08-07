@@ -5,6 +5,7 @@ const bodyParser = require('body-parser');
 const Database = require('./classes/database.js');
 const multer = require('multer');
 const bcrypt = require('bcrypt');
+const path = require('path'); // Add this import
 
 const db = new Database();
 
@@ -32,6 +33,9 @@ app.use(cors({
 
 // Middleware om JSON-requests te parsen
 app.use(bodyParser.json());
+
+// IMPORTANT: Serve static files from uploads directory
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 app.post('/upload', upload.single('file'), (req, res) => {
   if (!req.file) {
@@ -129,7 +133,7 @@ app.post('/api/login', async (req, res) => {
 
     // Fetch user by email
     const [rows] = await connection.execute(
-      'SELECT ID, Password FROM `User` WHERE Email = ?',
+      'SELECT ID, Email, Password, Role FROM `User` WHERE Email = ? AND Active = TRUE',
       [email]
     );
 
@@ -145,17 +149,315 @@ app.post('/api/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
-    // Success
-    return res.status(200).json({ message: 'Login successful.', userId: user.ID });
+    // Success - Return user info
+    return res.status(200).json({
+      message: 'Login successful',
+      user: {
+        id: user.ID,
+        email: user.Email,
+        role: user.Role
+      }
+    });
 
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: 'Server error during login.' });
   } finally {
     await connection.end();
   }
 });
 
+// 3. User profile page
+// 1. Get user profile by ID
+app.get('/api/profile/:id', async (req, res) => {
+  const userId = req.params.id;
+  const connection = await db.connect();
+  
+  try {
+    // Fetch user details
+    const [userRows] = await connection.execute(
+      `SELECT 
+        u.ID,
+        u.Username,
+        u.DateOfBirth,
+        u.Email,
+        u.PhoneNumber,
+        u.Bio,
+        u.GenderID,
+        g.Name as GenderName
+      FROM User u
+      LEFT JOIN Gender g ON u.GenderID = g.ID
+      WHERE u.ID = ? AND u.Active = TRUE`,
+      [userId]
+    );
+
+    if (userRows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Fetch user's profile picture
+    const [pictureRows] = await connection.execute(
+      `SELECT Picture 
+       FROM Pictures 
+       WHERE UserID = ? AND IsProfilePicture = TRUE
+       LIMIT 1`,
+      [userId]
+    );
+
+    // Fix: Add the full URL for the profile picture
+    let profilePictureUrl = null;
+    if (pictureRows.length > 0 && pictureRows[0].Picture) {
+      // If it's already a full URL, use it as is, otherwise prepend the server URL
+      profilePictureUrl = pictureRows[0].Picture.startsWith('http') 
+        ? pictureRows[0].Picture 
+        : `http://localhost:3000${pictureRows[0].Picture}`;
+    }
+
+    res.json({
+      profile: userRows[0],
+      profilePictureUrl: profilePictureUrl
+    });
+
+  } catch (err) {
+    console.error('Error fetching profile:', err);
+    res.status(500).json({ error: 'Failed to fetch profile' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 2. Update user profile
+app.put('/api/profile/:id', upload.single('profilePicture'), async (req, res) => {
+  const userId = req.params.id;
+  const connection = await db.connect();
+  
+  try {
+    const { Bio, GenderID, PhoneNumber } = req.body;
+
+    // Update user profile
+    await connection.execute(
+      `UPDATE User 
+       SET Bio = ?, 
+           GenderID = ?, 
+           PhoneNumber = ?,
+           UpdatedAt = CURRENT_TIMESTAMP
+       WHERE ID = ?`,
+      [Bio || null, GenderID || null, PhoneNumber || null, userId]
+    );
+
+    // Handle profile picture upload if provided
+    if (req.file) {
+      const imageUrl = `/uploads/${req.file.filename}`;
+      
+      // First, set all existing pictures to not be profile picture
+      await connection.execute(
+        `UPDATE Pictures 
+         SET IsProfilePicture = FALSE 
+         WHERE UserID = ?`,
+        [userId]
+      );
+
+      // Check if user already has pictures
+      const [existingPictures] = await connection.execute(
+        `SELECT ID FROM Pictures WHERE UserID = ? LIMIT 1`,
+        [userId]
+      );
+
+      if (existingPictures.length > 0) {
+        // Update the first picture to be the new profile picture
+        await connection.execute(
+          `UPDATE Pictures 
+           SET Picture = ?, IsProfilePicture = TRUE 
+           WHERE UserID = ? 
+           LIMIT 1`,
+          [imageUrl, userId]
+        );
+      } else {
+        // Insert new profile picture
+        await connection.execute(
+          `INSERT INTO Pictures (Picture, UserID, IsProfilePicture) 
+           VALUES (?, ?, TRUE)`,
+          [imageUrl, userId]
+        );
+      }
+    }
+
+    res.json({ message: 'Profile updated successfully' });
+
+  } catch (err) {
+    console.error('Error updating profile:', err);
+    res.status(500).json({ error: 'Failed to update profile' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 3. Get available genders
+app.get('/api/genders', async (req, res) => {
+  const connection = await db.connect();
+  
+  try {
+    const [genderRows] = await connection.execute(
+      `SELECT ID, Name FROM Gender ORDER BY ID`
+    );
+    
+    res.json(genderRows);
+    
+  } catch (err) {
+    console.error('Error fetching genders:', err);
+    res.status(500).json({ error: 'Failed to fetch genders' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 4. Get user preferences
+app.get('/api/preferences/:id', async (req, res) => {
+  const userId = req.params.id;
+  const connection = await db.connect();
+  
+  try {
+    // Check if user has preferences
+    const [prefRows] = await connection.execute(
+      `SELECT 
+        up.GenderID,
+        up.MaxDistance,
+        up.MinAge,
+        up.MaxAge
+      FROM UserPreferences up
+      WHERE up.UserID = ?`,
+      [userId]
+    );
+
+    if (prefRows.length > 0) {
+      res.json(prefRows[0]);
+    } else {
+      // Return default preferences if none exist
+      res.json({
+        GenderID: null,
+        MaxDistance: 50,
+        MinAge: 18,
+        MaxAge: 99
+      });
+    }
+
+  } catch (err) {
+    console.error('Error fetching preferences:', err);
+    res.status(500).json({ error: 'Failed to fetch preferences' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 5. Update user preferences
+app.put('/api/preferences/:id', async (req, res) => {
+  const userId = req.params.id;
+  const connection = await db.connect();
+  
+  try {
+    const { GenderID, MaxDistance, MinAge, MaxAge } = req.body;
+
+    // Check if preferences exist
+    const [existing] = await connection.execute(
+      `SELECT ID FROM UserPreferences WHERE UserID = ?`,
+      [userId]
+    );
+
+    if (existing.length > 0) {
+      // Update existing preferences
+      await connection.execute(
+        `UPDATE UserPreferences 
+         SET GenderID = ?,
+             MaxDistance = ?,
+             MinAge = ?,
+             MaxAge = ?
+         WHERE UserID = ?`,
+        [GenderID || null, MaxDistance || 50, MinAge || 18, MaxAge || 99, userId]
+      );
+    } else {
+      // Insert new preferences
+      await connection.execute(
+        `INSERT INTO UserPreferences 
+         (UserID, GenderID, MaxDistance, MinAge, MaxAge) 
+         VALUES (?, ?, ?, ?, ?)`,
+        [userId, GenderID || null, MaxDistance || 50, MinAge || 18, MaxAge || 99]
+      );
+    }
+
+    // Also update PreferredGender table if GenderID is provided
+    if (GenderID) {
+      // Delete existing preferred genders
+      await connection.execute(
+        `DELETE FROM PreferredGender WHERE UserID = ?`,
+        [userId]
+      );
+      
+      // Insert new preferred gender
+      await connection.execute(
+        `INSERT INTO PreferredGender (UserID, GenderID) VALUES (?, ?)`,
+        [userId, GenderID]
+      );
+    }
+
+    res.json({ message: 'Preferences updated successfully' });
+
+  } catch (err) {
+    console.error('Error updating preferences:', err);
+    res.status(500).json({ error: 'Failed to update preferences' });
+  } finally {
+    await connection.end();
+  }
+});
+
+
+// SWIPE ENDPOINTS:
+// 1. Load users for swiping
+app.get('/api/users/swipe/:id', async (req, res) => {
+  const userId = req.params.id;
+  const connection = await db.connect();
+  try {
+    const [userRows] = await connection.execute(
+      `SELECT ID, Username, DateOfBirth, Bio
+       FROM User
+       WHERE ID != ? AND Role = 'user' AND Active = TRUE`,
+      [userId]
+    );
+
+    const [pictureRows] = await connection.execute(
+      `SELECT UserID, Picture FROM Pictures`
+    );
+
+    // Group pictures by userID
+    const picturesMap = {};
+    pictureRows.forEach(pic => {
+      if (!picturesMap[pic.UserID]) picturesMap[pic.UserID] = [];
+      // Fix: Add full URL for pictures
+      const fullUrl = pic.Picture.startsWith('http') 
+        ? pic.Picture 
+        : `http://localhost:3000${pic.Picture}`;
+      picturesMap[pic.UserID].push(fullUrl);
+    });
+
+    const users = userRows.map(user => {
+      const age = new Date().getFullYear() - new Date(user.DateOfBirth).getFullYear();
+      return {
+        id: user.ID,
+        name: user.Username,
+        age,
+        bio: user.Bio,
+        pictures: picturesMap[user.ID] || ['https://via.placeholder.com/300x300?text=User']
+      };
+    });
+
+    res.json(users);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to load users' });
+  } finally {
+    await connection.end();
+  }
+});
 
 // ADMIN ENDPOINTS:
 // 1. User overview
@@ -266,4 +568,3 @@ app.delete('/api/admin/users/:id', async (req, res) => {
 app.listen(3000, () => {
   console.log('Server is running on port 3000');
 });
-  
