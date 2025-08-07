@@ -5,7 +5,7 @@ const bodyParser = require('body-parser');
 const Database = require('./classes/database.js');
 const multer = require('multer');
 const bcrypt = require('bcrypt');
-const path = require('path'); // Add this import
+const path = require('path'); // --> nodig voor pics
 
 const db = new Database();
 
@@ -54,7 +54,9 @@ app.get('/', (req, res) => {
 
 // ALLES HIERBOVEN LATEN STAAN!!
 
-// USER ACCOUNT ENDPOINTS:
+// =======================================================================================
+// USER ACCOUNT ENDPOINTS
+// =======================================================================================
 // 1. registration endpoint
 app.post('/api/register', upload.array('pictures', 5), async (req, res) => {
   const connection = await db.connect();
@@ -151,7 +153,6 @@ app.post('/api/login', async (req, res) => {
 
     // Success - Return user info
     return res.status(200).json({
-      message: 'Login successful',
       user: {
         id: user.ID,
         email: user.Email,
@@ -168,7 +169,7 @@ app.post('/api/login', async (req, res) => {
 });
 
 // 3. User profile page
-// 1. Get user profile by ID
+//    1. Get user profile by ID
 app.get('/api/profile/:id', async (req, res) => {
   const userId = req.params.id;
   const connection = await db.connect();
@@ -226,7 +227,7 @@ app.get('/api/profile/:id', async (req, res) => {
   }
 });
 
-// 2. Update user profile
+//    2. Update user profile
 app.put('/api/profile/:id', upload.single('profilePicture'), async (req, res) => {
   const userId = req.params.id;
   const connection = await db.connect();
@@ -292,7 +293,7 @@ app.put('/api/profile/:id', upload.single('profilePicture'), async (req, res) =>
   }
 });
 
-// 3. Get available genders
+//     3. Get available genders
 app.get('/api/genders', async (req, res) => {
   const connection = await db.connect();
   
@@ -311,7 +312,7 @@ app.get('/api/genders', async (req, res) => {
   }
 });
 
-// 4. Get user preferences
+//     4. Get user preferences
 app.get('/api/preferences/:id', async (req, res) => {
   const userId = req.params.id;
   const connection = await db.connect();
@@ -349,7 +350,7 @@ app.get('/api/preferences/:id', async (req, res) => {
   }
 });
 
-// 5. Update user preferences
+//     5. Update user preferences
 app.put('/api/preferences/:id', async (req, res) => {
   const userId = req.params.id;
   const connection = await db.connect();
@@ -409,22 +410,30 @@ app.put('/api/preferences/:id', async (req, res) => {
   }
 });
 
-
-// SWIPE ENDPOINTS:
-// 1. Load users for swiping
+// =======================================================================================
+// SWIPE ENDPOINTS
+// =======================================================================================
+// 1. Load users for swiping (excludes already swiped users)
 app.get('/api/users/swipe/:id', async (req, res) => {
   const userId = req.params.id;
   const connection = await db.connect();
   try {
+    // Get users that haven't been swiped yet
     const [userRows] = await connection.execute(
-      `SELECT ID, Username, DateOfBirth, Bio
-       FROM User
-       WHERE ID != ? AND Role = 'user' AND Active = TRUE`,
-      [userId]
+      `SELECT u.ID, u.Username, u.DateOfBirth, u.Bio
+       FROM User u
+       WHERE u.ID != ? 
+       AND u.Role = 'user' 
+       AND u.Active = TRUE
+       AND u.ID NOT IN (
+         SELECT SwipedID FROM Swipe WHERE SwiperID = ?
+       )
+       ORDER BY u.CreatedAt DESC`,
+      [userId, userId]
     );
 
     const [pictureRows] = await connection.execute(
-      `SELECT UserID, Picture FROM Pictures`
+      `SELECT UserID, Picture FROM Pictures WHERE IsProfilePicture = TRUE`
     );
 
     // Group pictures by userID
@@ -444,7 +453,8 @@ app.get('/api/users/swipe/:id', async (req, res) => {
         id: user.ID,
         name: user.Username,
         age,
-        bio: user.Bio,
+        bio: user.Bio || 'No bio yet',
+        picture: picturesMap[user.ID]?.[0] || 'https://via.placeholder.com/300x300?text=User',
         pictures: picturesMap[user.ID] || ['https://via.placeholder.com/300x300?text=User']
       };
     });
@@ -454,6 +464,175 @@ app.get('/api/users/swipe/:id', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to load users' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 2. Record a swipe (like or dislike)
+app.post('/api/swipe', async (req, res) => {
+  const connection = await db.connect();
+  try {
+    const { swiperId, swipedId, liked } = req.body;
+
+    // Validate input
+    if (!swiperId || !swipedId || liked === undefined) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Insert swipe record
+    await connection.execute(
+      `INSERT INTO Swipe (SwiperID, SwipedID, Liked, DateCreated) 
+       VALUES (?, ?, ?, NOW())`,
+      [swiperId, swipedId, liked]
+    );
+
+    // Check if it's a match (both users liked each other)
+    let isMatch = false;
+    if (liked) {
+      const [reverseSwipe] = await connection.execute(
+        `SELECT Liked FROM Swipe 
+         WHERE SwiperID = ? AND SwipedID = ? AND Liked = TRUE`,
+        [swipedId, swiperId]
+      );
+
+      if (reverseSwipe.length > 0) {
+        // It's a match! Create match record
+        isMatch = true;
+        
+        // Insert match record (ensure User1ID < User2ID for consistency)
+        const user1Id = Math.min(swiperId, swipedId);
+        const user2Id = Math.max(swiperId, swipedId);
+        
+        // Check if match doesn't already exist
+        const [existingMatch] = await connection.execute(
+          `SELECT ID FROM \`Match\` WHERE User1ID = ? AND User2ID = ?`,
+          [user1Id, user2Id]
+        );
+
+        if (existingMatch.length === 0) {
+          const [matchResult] = await connection.execute(
+            `INSERT INTO \`Match\` (User1ID, User2ID, DateCreated) 
+             VALUES (?, ?, NOW())`,
+            [user1Id, user2Id]
+          );
+
+          // Create conversation for the match
+          await connection.execute(
+            `INSERT INTO Conversation (MatchID, DateCreated) 
+             VALUES (?, NOW())`,
+            [matchResult.insertId]
+          );
+        }
+      }
+    }
+
+    res.json({ 
+      message: 'Swipe recorded successfully',
+      isMatch: isMatch 
+    });
+
+  } catch (err) {
+    console.error('Error recording swipe:', err);
+    res.status(500).json({ error: 'Failed to record swipe' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 3. Get user's matches
+app.get('/api/matches/:id', async (req, res) => {
+  const userId = req.params.id;
+  const connection = await db.connect();
+  
+  try {
+    const [matchRows] = await connection.execute(
+      `SELECT 
+        m.ID as matchId,
+        m.DateCreated as matchDate,
+        CASE 
+          WHEN m.User1ID = ? THEN m.User2ID 
+          ELSE m.User1ID 
+        END as matchedUserId,
+        u.Username as matchedUserName,
+        u.Bio as matchedUserBio,
+        p.Picture as matchedUserPicture
+      FROM \`Match\` m
+      JOIN User u ON u.ID = CASE 
+        WHEN m.User1ID = ? THEN m.User2ID 
+        ELSE m.User1ID 
+      END
+      LEFT JOIN Pictures p ON p.UserID = u.ID AND p.IsProfilePicture = TRUE
+      WHERE (m.User1ID = ? OR m.User2ID = ?)
+      ORDER BY m.DateCreated DESC`,
+      [userId, userId, userId, userId]
+    );
+
+    const matches = matchRows.map(match => ({
+      matchId: match.matchId,
+      matchDate: match.matchDate,
+      user: {
+        id: match.matchedUserId,
+        name: match.matchedUserName,
+        bio: match.matchedUserBio,
+        picture: match.matchedUserPicture 
+          ? (match.matchedUserPicture.startsWith('http') 
+              ? match.matchedUserPicture 
+              : `http://localhost:3000${match.matchedUserPicture}`)
+          : 'https://via.placeholder.com/300x300?text=User'
+      }
+    }));
+
+    res.json(matches);
+
+  } catch (err) {
+    console.error('Error fetching matches:', err);
+    res.status(500).json({ error: 'Failed to fetch matches' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 4. Get swipe statistics for a user
+app.get('/api/swipe-stats/:id', async (req, res) => {
+  const userId = req.params.id;
+  const connection = await db.connect();
+  
+  try {
+    // Get total swipes made
+    const [totalSwipes] = await connection.execute(
+      `SELECT COUNT(*) as total FROM Swipe WHERE SwiperID = ?`,
+      [userId]
+    );
+
+    // Get likes given
+    const [likesGiven] = await connection.execute(
+      `SELECT COUNT(*) as total FROM Swipe WHERE SwiperID = ? AND Liked = TRUE`,
+      [userId]
+    );
+
+    // Get likes received
+    const [likesReceived] = await connection.execute(
+      `SELECT COUNT(*) as total FROM Swipe WHERE SwipedID = ? AND Liked = TRUE`,
+      [userId]
+    );
+
+    // Get total matches
+    const [matches] = await connection.execute(
+      `SELECT COUNT(*) as total FROM \`Match\` WHERE User1ID = ? OR User2ID = ?`,
+      [userId, userId]
+    );
+
+    res.json({
+      totalSwipes: totalSwipes[0].total,
+      likesGiven: likesGiven[0].total,
+      likesReceived: likesReceived[0].total,
+      matches: matches[0].total
+    });
+
+  } catch (err) {
+    console.error('Error fetching swipe stats:', err);
+    res.status(500).json({ error: 'Failed to fetch statistics' });
   } finally {
     await connection.end();
   }
