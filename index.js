@@ -5,7 +5,7 @@ const bodyParser = require('body-parser');
 const Database = require('./classes/database.js');
 const multer = require('multer');
 const bcrypt = require('bcrypt');
-const path = require('path'); // --> nodig voor pics
+const path = require('path'); // Add this import
 
 const db = new Database();
 
@@ -54,9 +54,7 @@ app.get('/', (req, res) => {
 
 // ALLES HIERBOVEN LATEN STAAN!!
 
-// =======================================================================================
-// USER ACCOUNT ENDPOINTS
-// =======================================================================================
+// USER ACCOUNT ENDPOINTS:
 // 1. registration endpoint
 app.post('/api/register', upload.array('pictures', 5), async (req, res) => {
   const connection = await db.connect();
@@ -153,6 +151,7 @@ app.post('/api/login', async (req, res) => {
 
     // Success - Return user info
     return res.status(200).json({
+      message: 'Login successful',
       user: {
         id: user.ID,
         email: user.Email,
@@ -169,7 +168,7 @@ app.post('/api/login', async (req, res) => {
 });
 
 // 3. User profile page
-//    1. Get user profile by ID
+// 1. Get user profile by ID
 app.get('/api/profile/:id', async (req, res) => {
   const userId = req.params.id;
   const connection = await db.connect();
@@ -227,7 +226,7 @@ app.get('/api/profile/:id', async (req, res) => {
   }
 });
 
-//    2. Update user profile
+// 2. Update user profile
 app.put('/api/profile/:id', upload.single('profilePicture'), async (req, res) => {
   const userId = req.params.id;
   const connection = await db.connect();
@@ -293,7 +292,7 @@ app.put('/api/profile/:id', upload.single('profilePicture'), async (req, res) =>
   }
 });
 
-//     3. Get available genders
+// 3. Get available genders
 app.get('/api/genders', async (req, res) => {
   const connection = await db.connect();
   
@@ -312,16 +311,17 @@ app.get('/api/genders', async (req, res) => {
   }
 });
 
-//     4. Get user preferences
+// Updated API endpoints for multiple gender preferences
+
+// 4. Get user preferences (UPDATED)
 app.get('/api/preferences/:id', async (req, res) => {
   const userId = req.params.id;
   const connection = await db.connect();
   
   try {
-    // Check if user has preferences
+    // Get basic preferences
     const [prefRows] = await connection.execute(
       `SELECT 
-        up.GenderID,
         up.MaxDistance,
         up.MinAge,
         up.MaxAge
@@ -330,12 +330,27 @@ app.get('/api/preferences/:id', async (req, res) => {
       [userId]
     );
 
+    // Get selected gender preferences
+    const [genderRows] = await connection.execute(
+      `SELECT pg.GenderID 
+       FROM PreferredGender pg
+       WHERE pg.UserID = ?`,
+      [userId]
+    );
+
+    const selectedGenders = genderRows.map(row => row.GenderID);
+
     if (prefRows.length > 0) {
-      res.json(prefRows[0]);
+      res.json({
+        selectedGenders: selectedGenders,
+        MaxDistance: prefRows[0].MaxDistance,
+        MinAge: prefRows[0].MinAge,
+        MaxAge: prefRows[0].MaxAge
+      });
     } else {
       // Return default preferences if none exist
       res.json({
-        GenderID: null,
+        selectedGenders: [],
         MaxDistance: 50,
         MinAge: 18,
         MaxAge: 99
@@ -350,59 +365,83 @@ app.get('/api/preferences/:id', async (req, res) => {
   }
 });
 
-//     5. Update user preferences
+// 5. Update user preferences (UPDATED)
 app.put('/api/preferences/:id', async (req, res) => {
   const userId = req.params.id;
   const connection = await db.connect();
   
   try {
-    const { GenderID, MaxDistance, MinAge, MaxAge } = req.body;
+    await connection.beginTransaction();
 
-    // Check if preferences exist
+    const { selectedGenders, MaxDistance, MinAge, MaxAge } = req.body;
+
+    // Validate selectedGenders is an array
+    if (!Array.isArray(selectedGenders)) {
+      return res.status(400).json({ error: 'selectedGenders must be an array' });
+    }
+
+    // Check if basic preferences exist
     const [existing] = await connection.execute(
       `SELECT ID FROM UserPreferences WHERE UserID = ?`,
       [userId]
     );
 
     if (existing.length > 0) {
-      // Update existing preferences
+      // Update existing basic preferences
       await connection.execute(
         `UPDATE UserPreferences 
-         SET GenderID = ?,
-             MaxDistance = ?,
+         SET MaxDistance = ?,
              MinAge = ?,
              MaxAge = ?
          WHERE UserID = ?`,
-        [GenderID || null, MaxDistance || 50, MinAge || 18, MaxAge || 99, userId]
+        [MaxDistance || 50, MinAge || 18, MaxAge || 99, userId]
       );
     } else {
-      // Insert new preferences
+      // Insert new basic preferences
       await connection.execute(
         `INSERT INTO UserPreferences 
-         (UserID, GenderID, MaxDistance, MinAge, MaxAge) 
-         VALUES (?, ?, ?, ?, ?)`,
-        [userId, GenderID || null, MaxDistance || 50, MinAge || 18, MaxAge || 99]
+         (UserID, MaxDistance, MinAge, MaxAge) 
+         VALUES (?, ?, ?, ?)`,
+        [userId, MaxDistance || 50, MinAge || 18, MaxAge || 99]
       );
     }
 
-    // Also update PreferredGender table if GenderID is provided
-    if (GenderID) {
-      // Delete existing preferred genders
-      await connection.execute(
-        `DELETE FROM PreferredGender WHERE UserID = ?`,
-        [userId]
+    // Delete existing gender preferences
+    await connection.execute(
+      `DELETE FROM PreferredGender WHERE UserID = ?`,
+      [userId]
+    );
+    
+    // Insert new gender preferences
+    if (selectedGenders.length > 0) {
+      // Validate that all gender IDs exist
+      const placeholders = selectedGenders.map(() => '?').join(',');
+      const [validGenders] = await connection.execute(
+        `SELECT ID FROM Gender WHERE ID IN (${placeholders})`,
+        selectedGenders
+      );
+
+      if (validGenders.length !== selectedGenders.length) {
+        await connection.rollback();
+        return res.status(400).json({ error: 'One or more invalid gender IDs provided' });
+      }
+
+      // Insert all selected genders
+      const insertPromises = selectedGenders.map(genderId => 
+        connection.execute(
+          `INSERT INTO PreferredGender (UserID, GenderID) VALUES (?, ?)`,
+          [userId, genderId]
+        )
       );
       
-      // Insert new preferred gender
-      await connection.execute(
-        `INSERT INTO PreferredGender (UserID, GenderID) VALUES (?, ?)`,
-        [userId, GenderID]
-      );
+      await Promise.all(insertPromises);
     }
 
+    await connection.commit();
     res.json({ message: 'Preferences updated successfully' });
 
   } catch (err) {
+    await connection.rollback();
     console.error('Error updating preferences:', err);
     res.status(500).json({ error: 'Failed to update preferences' });
   } finally {
@@ -410,9 +449,151 @@ app.put('/api/preferences/:id', async (req, res) => {
   }
 });
 
-// =======================================================================================
-// SWIPE ENDPOINTS
-// =======================================================================================
+// UPDATED: Load users for swiping with multiple gender preferences
+app.get('/api/users/swipe/:id', async (req, res) => {
+  const userId = req.params.id;
+  const connection = await db.connect();
+  try {
+    // Get user's preferred genders
+    const [preferredGenders] = await connection.execute(
+      `SELECT pg.GenderID 
+       FROM PreferredGender pg
+       WHERE pg.UserID = ?`,
+      [userId]
+    );
+
+    // Get user's other preferences
+    const [userPrefs] = await connection.execute(
+      `SELECT MaxDistance, MinAge, MaxAge 
+       FROM UserPreferences 
+       WHERE UserID = ?`,
+      [userId]
+    );
+
+    let genderFilter = '';
+    let queryParams = [userId, userId];
+
+    // If user has gender preferences, filter by them
+    if (preferredGenders.length > 0) {
+      const genderIds = preferredGenders.map(pg => pg.GenderID);
+      const placeholders = genderIds.map(() => '?').join(',');
+      genderFilter = `AND u.GenderID IN (${placeholders})`;
+      queryParams.push(...genderIds);
+    }
+
+    // Add age filtering if preferences exist
+    let ageFilter = '';
+    if (userPrefs.length > 0) {
+      const minAge = userPrefs[0].MinAge || 18;
+      const maxAge = userPrefs[0].MaxAge || 99;
+      ageFilter = `AND (YEAR(CURDATE()) - YEAR(u.DateOfBirth) - (RIGHT(CURDATE(), 5) < RIGHT(u.DateOfBirth, 5))) BETWEEN ? AND ?`;
+      queryParams.push(minAge, maxAge);
+    }
+
+    // Get users that haven't been swiped yet, filtered by preferences
+    const [userRows] = await connection.execute(
+      `SELECT u.ID, u.Username, u.DateOfBirth, u.Bio
+       FROM User u
+       WHERE u.ID != ? 
+       AND u.Role = 'user' 
+       AND u.Active = TRUE
+       AND u.ID NOT IN (
+         SELECT SwipedID FROM Swipe WHERE SwiperID = ?
+       )
+       ${genderFilter}
+       ${ageFilter}
+       ORDER BY u.CreatedAt DESC`,
+      queryParams
+    );
+
+    const [pictureRows] = await connection.execute(
+      `SELECT UserID, Picture FROM Pictures WHERE IsProfilePicture = TRUE`
+    );
+
+    // Group pictures by userID
+    const picturesMap = {};
+    pictureRows.forEach(pic => {
+      if (!picturesMap[pic.UserID]) picturesMap[pic.UserID] = [];
+      // Fix: Add full URL for pictures
+      const fullUrl = pic.Picture.startsWith('http') 
+        ? pic.Picture 
+        : `http://localhost:3000${pic.Picture}`;
+      picturesMap[pic.UserID].push(fullUrl);
+    });
+
+    const users = userRows.map(user => {
+      const age = new Date().getFullYear() - new Date(user.DateOfBirth).getFullYear();
+      return {
+        id: user.ID,
+        name: user.Username,
+        age,
+        bio: user.Bio || 'No bio yet',
+        picture: picturesMap[user.ID]?.[0] || 'https://via.placeholder.com/300x300?text=User',
+        pictures: picturesMap[user.ID] || ['https://via.placeholder.com/300x300?text=User']
+      };
+    });
+
+    res.json(users);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to load users' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// NEW: Get user's gender preference statistics
+app.get('/api/preferences/:id/stats', async (req, res) => {
+  const userId = req.params.id;
+  const connection = await db.connect();
+  
+  try {
+    // Get preferred genders with counts
+    const [preferredGendersStats] = await connection.execute(
+      `SELECT 
+        g.Name as GenderName,
+        g.ID as GenderID,
+        COUNT(DISTINCT u.ID) as AvailableUsers
+       FROM PreferredGender pg
+       JOIN Gender g ON pg.GenderID = g.ID
+       LEFT JOIN User u ON u.GenderID = g.ID 
+         AND u.ID != ? 
+         AND u.Active = TRUE 
+         AND u.Role = 'user'
+         AND u.ID NOT IN (SELECT SwipedID FROM Swipe WHERE SwiperID = ?)
+       WHERE pg.UserID = ?
+       GROUP BY g.ID, g.Name`,
+      [userId, userId, userId]
+    );
+
+    // Get total available users matching preferences
+    const [totalAvailable] = await connection.execute(
+      `SELECT COUNT(DISTINCT u.ID) as total
+       FROM User u
+       WHERE u.ID != ? 
+       AND u.Role = 'user' 
+       AND u.Active = TRUE
+       AND u.ID NOT IN (SELECT SwipedID FROM Swipe WHERE SwiperID = ?)
+       AND u.GenderID IN (SELECT GenderID FROM PreferredGender WHERE UserID = ?)`,
+      [userId, userId, userId]
+    );
+
+    res.json({
+      preferredGenders: preferredGendersStats,
+      totalAvailableUsers: totalAvailable[0]?.total || 0
+    });
+
+  } catch (err) {
+    console.error('Error fetching preference stats:', err);
+    res.status(500).json({ error: 'Failed to fetch preference statistics' });
+  } finally {
+    await connection.end();
+  }
+});
+
+
+// SWIPE ENDPOINTS:
 // 1. Load users for swiping (excludes already swiped users)
 app.get('/api/users/swipe/:id', async (req, res) => {
   const userId = req.params.id;
@@ -633,6 +814,240 @@ app.get('/api/swipe-stats/:id', async (req, res) => {
   } catch (err) {
     console.error('Error fetching swipe stats:', err);
     res.status(500).json({ error: 'Failed to fetch statistics' });
+  } finally {
+    await connection.end();
+  }
+});
+
+
+// MESSAGING ENDPOINTS:
+// 1. Get conversations for a user
+app.get('/api/conversations/:userId', async (req, res) => {
+  const userId = req.params.userId;
+  const connection = await db.connect();
+  
+  try {
+    // Get all conversations with last message for each
+    const [conversations] = await connection.execute(
+      `SELECT 
+        c.ID as conversationId,
+        m.ID as matchId,
+        CASE 
+          WHEN m.User1ID = ? THEN m.User2ID 
+          ELSE m.User1ID 
+        END as otherUserId,
+        u.Username as otherUserName,
+        p.Picture as otherUserPicture,
+        (SELECT Content FROM Messages 
+         WHERE ConversationID = c.ID 
+         ORDER BY Timestamp DESC LIMIT 1) as lastMessage,
+        (SELECT Timestamp FROM Messages 
+         WHERE ConversationID = c.ID 
+         ORDER BY Timestamp DESC LIMIT 1) as lastMessageTime,
+        (SELECT SenderID FROM Messages 
+         WHERE ConversationID = c.ID 
+         ORDER BY Timestamp DESC LIMIT 1) as lastMessageSender,
+        (SELECT COUNT(*) FROM Messages 
+         WHERE ConversationID = c.ID 
+         AND SenderID != ? 
+         AND Timestamp > COALESCE(
+           (SELECT MAX(Timestamp) FROM Messages 
+            WHERE ConversationID = c.ID AND SenderID = ?), 
+           '1970-01-01')) as unreadCount
+      FROM Conversation c
+      JOIN \`Match\` m ON c.MatchID = m.ID
+      JOIN User u ON u.ID = CASE 
+        WHEN m.User1ID = ? THEN m.User2ID 
+        ELSE m.User1ID 
+      END
+      LEFT JOIN Pictures p ON p.UserID = u.ID AND p.IsProfilePicture = TRUE
+      WHERE m.User1ID = ? OR m.User2ID = ?
+      ORDER BY 
+        CASE 
+          WHEN (SELECT Timestamp FROM Messages WHERE ConversationID = c.ID ORDER BY Timestamp DESC LIMIT 1) IS NULL 
+          THEN 1 
+          ELSE 0 
+        END,
+        (SELECT Timestamp FROM Messages WHERE ConversationID = c.ID ORDER BY Timestamp DESC LIMIT 1) DESC,
+        c.DateCreated DESC`,
+      [userId, userId, userId, userId, userId, userId]
+    );
+
+    const formattedConversations = conversations.map(conv => ({
+      conversationId: conv.conversationId,
+      matchId: conv.matchId,
+      otherUser: {
+        id: conv.otherUserId,
+        name: conv.otherUserName,
+        picture: conv.otherUserPicture 
+          ? (conv.otherUserPicture.startsWith('http') 
+              ? conv.otherUserPicture 
+              : `http://localhost:3000${conv.otherUserPicture}`)
+          : 'https://via.placeholder.com/300x300?text=User'
+      },
+      lastMessage: conv.lastMessage,
+      lastMessageTime: conv.lastMessageTime,
+      lastMessageSender: conv.lastMessageSender,
+      unreadCount: conv.unreadCount || 0,
+      hasMessages: !!conv.lastMessage
+    }));
+
+    res.json(formattedConversations);
+
+  } catch (err) {
+    console.error('Error fetching conversations:', err);
+    res.status(500).json({ error: 'Failed to fetch conversations' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 2. Get messages for a specific conversation
+app.get('/api/conversations/:conversationId/messages', async (req, res) => {
+  const conversationId = req.params.conversationId;
+  const connection = await db.connect();
+  
+  try {
+    // Get all messages for this conversation
+    const [messages] = await connection.execute(
+      `SELECT 
+        m.ID as messageId,
+        m.Content as content,
+        m.SenderID as senderId,
+        m.Timestamp as timestamp,
+        u.Username as senderName,
+        p.Picture as senderPicture
+      FROM Messages m
+      JOIN User u ON m.SenderID = u.ID
+      LEFT JOIN Pictures p ON p.UserID = u.ID AND p.IsProfilePicture = TRUE
+      WHERE m.ConversationID = ?
+      ORDER BY m.Timestamp ASC`,
+      [conversationId]
+    );
+
+    const formattedMessages = messages.map(msg => ({
+      messageId: msg.messageId,
+      content: msg.content,
+      senderId: msg.senderId,
+      senderName: msg.senderName,
+      senderPicture: msg.senderPicture 
+        ? (msg.senderPicture.startsWith('http') 
+            ? msg.senderPicture 
+            : `http://localhost:3000${msg.senderPicture}`)
+        : null,
+      timestamp: msg.timestamp
+    }));
+
+    res.json(formattedMessages);
+
+  } catch (err) {
+    console.error('Error fetching messages:', err);
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 3. Send a new message
+app.post('/api/conversations/:conversationId/messages', async (req, res) => {
+  const conversationId = req.params.conversationId;
+  const { senderId, content } = req.body;
+  const connection = await db.connect();
+  
+  try {
+    // Validate that the sender is part of this conversation
+    const [validation] = await connection.execute(
+      `SELECT m.ID 
+       FROM Conversation c
+       JOIN \`Match\` m ON c.MatchID = m.ID
+       WHERE c.ID = ? 
+       AND (m.User1ID = ? OR m.User2ID = ?)`,
+      [conversationId, senderId, senderId]
+    );
+
+    if (validation.length === 0) {
+      return res.status(403).json({ error: 'You are not part of this conversation' });
+    }
+
+    // Insert the message
+    const [result] = await connection.execute(
+      `INSERT INTO Messages (ConversationID, SenderID, Content, Timestamp) 
+       VALUES (?, ?, ?, NOW())`,
+      [conversationId, senderId, content]
+    );
+
+    // Get the inserted message with sender info
+    const [newMessage] = await connection.execute(
+      `SELECT 
+        m.ID as messageId,
+        m.Content as content,
+        m.SenderID as senderId,
+        m.Timestamp as timestamp,
+        u.Username as senderName,
+        p.Picture as senderPicture
+      FROM Messages m
+      JOIN User u ON m.SenderID = u.ID
+      LEFT JOIN Pictures p ON p.UserID = u.ID AND p.IsProfilePicture = TRUE
+      WHERE m.ID = ?`,
+      [result.insertId]
+    );
+
+    const formattedMessage = {
+      messageId: newMessage[0].messageId,
+      content: newMessage[0].content,
+      senderId: newMessage[0].senderId,
+      senderName: newMessage[0].senderName,
+      senderPicture: newMessage[0].senderPicture 
+        ? (newMessage[0].senderPicture.startsWith('http') 
+            ? newMessage[0].senderPicture 
+            : `http://localhost:3000${newMessage[0].senderPicture}`)
+        : null,
+      timestamp: newMessage[0].timestamp
+    };
+
+    res.json({
+      message: 'Message sent successfully',
+      data: formattedMessage
+    });
+
+  } catch (err) {
+    console.error('Error sending message:', err);
+    res.status(500).json({ error: 'Failed to send message' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 4. Get or create conversation by match ID
+app.get('/api/matches/:matchId/conversation', async (req, res) => {
+  const matchId = req.params.matchId;
+  const connection = await db.connect();
+  
+  try {
+    // Check if conversation already exists
+    const [existing] = await connection.execute(
+      `SELECT ID FROM Conversation WHERE MatchID = ?`,
+      [matchId]
+    );
+
+    let conversationId;
+    
+    if (existing.length > 0) {
+      conversationId = existing[0].ID;
+    } else {
+      // Create new conversation
+      const [result] = await connection.execute(
+        `INSERT INTO Conversation (MatchID, DateCreated) VALUES (?, NOW())`,
+        [matchId]
+      );
+      conversationId = result.insertId;
+    }
+
+    res.json({ conversationId });
+
+  } catch (err) {
+    console.error('Error getting/creating conversation:', err);
+    res.status(500).json({ error: 'Failed to get conversation' });
   } finally {
     await connection.end();
   }
