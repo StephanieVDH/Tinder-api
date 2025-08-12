@@ -53,8 +53,9 @@ app.get('/', (req, res) => {
 });
 
 // ALLES HIERBOVEN LATEN STAAN!!
-
+// -----------------------------------------------------------------------------------------------------
 // USER ACCOUNT ENDPOINTS:
+// -----------------------------------------------------------------------------------------------------
 // 1. registration endpoint
 app.post('/api/register', upload.array('pictures', 5), async (req, res) => {
   const connection = await db.connect();
@@ -450,9 +451,10 @@ app.put('/api/preferences/:id', async (req, res) => {
     await connection.end();
   }
 });
-
+// -----------------------------------------------------------------------------------------------------
 // SWIPE ENDPOINTS:
-// 1. Load users for swiping (excludes already swiped users) - UPDATED with location and distance filtering
+// -----------------------------------------------------------------------------------------------------
+// 1. Load users for swiping (excludes already swiped users and blocked users) - UPDATED with blocking and location
 app.get('/api/users/swipe/:id', async (req, res) => {
   const userId = req.params.id;
   const connection = await db.connect();
@@ -487,7 +489,7 @@ app.get('/api/users/swipe/:id', async (req, res) => {
     );
 
     let genderFilter = '';
-    let queryParams = [userId, userId];
+    let queryParams = [userId, userId, userId, userId];
 
     // If user has gender preferences, filter by them
     if (preferredGenders.length > 0) {
@@ -506,7 +508,7 @@ app.get('/api/users/swipe/:id', async (req, res) => {
       queryParams.push(minAge, maxAge);
     }
 
-    // Get users that haven't been swiped yet, filtered by preferences and including location data
+    // Get users that haven't been swiped yet, filtered by preferences and excluding blocked users
     const [userRows] = await connection.execute(
       `SELECT u.ID, u.Username, u.DateOfBirth, u.Bio, u.Latitude, u.Longitude
        FROM User u
@@ -517,6 +519,12 @@ app.get('/api/users/swipe/:id', async (req, res) => {
        AND u.Longitude IS NOT NULL
        AND u.ID NOT IN (
          SELECT SwipedID FROM Swipe WHERE SwiperID = ?
+       )
+       AND u.ID NOT IN (
+         SELECT BlockedID FROM BlockedUsers WHERE BlockerID = ?
+       )
+       AND u.ID NOT IN (
+         SELECT BlockerID FROM BlockedUsers WHERE BlockedID = ?
        )
        ${genderFilter}
        ${ageFilter}
@@ -594,7 +602,7 @@ function deg2rad(deg) {
   return deg * (Math.PI/180);
 }
 
-// 2. Record a swipe (like or dislike)
+// 2. Record a swipe (like or dislike) - UPDATED with blocking check
 app.post('/api/swipe', async (req, res) => {
   const connection = await db.connect();
   try {
@@ -603,6 +611,18 @@ app.post('/api/swipe', async (req, res) => {
     // Validate input
     if (!swiperId || !swipedId || liked === undefined) {
       return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Check if either user has blocked the other
+    const [blockCheck] = await connection.execute(
+      `SELECT ID FROM BlockedUsers 
+       WHERE (BlockerID = ? AND BlockedID = ?) 
+       OR (BlockerID = ? AND BlockedID = ?)`,
+      [swiperId, swipedId, swipedId, swiperId]
+    );
+
+    if (blockCheck.length > 0) {
+      return res.status(400).json({ error: 'Cannot swipe on blocked user' });
     }
 
     // Insert swipe record
@@ -665,7 +685,7 @@ app.post('/api/swipe', async (req, res) => {
   }
 });
 
-// 3. Get user's matches
+// 3. Get user's matches (exclude blocked users)
 app.get('/api/matches/:id', async (req, res) => {
   const userId = req.params.id;
   const connection = await db.connect();
@@ -689,8 +709,14 @@ app.get('/api/matches/:id', async (req, res) => {
       END
       LEFT JOIN Pictures p ON p.UserID = u.ID AND p.IsProfilePicture = TRUE
       WHERE (m.User1ID = ? OR m.User2ID = ?)
+      AND u.ID NOT IN (
+        SELECT BlockedID FROM BlockedUsers WHERE BlockerID = ?
+      )
+      AND u.ID NOT IN (
+        SELECT BlockerID FROM BlockedUsers WHERE BlockedID = ?
+      )
       ORDER BY m.DateCreated DESC`,
-      [userId, userId, userId, userId]
+      [userId, userId, userId, userId, userId, userId]
     );
 
     const matches = matchRows.map(match => ({
@@ -811,8 +837,169 @@ app.get('/api/preferences/:id/stats', async (req, res) => {
     await connection.end();
   }
 });
+// -----------------------------------------------------------------------------------------------------
+// BLOCKING ENDPOINTS:
+// -----------------------------------------------------------------------------------------------------
+// 1. Block a user
+app.post('/api/block', async (req, res) => {
+  const connection = await db.connect();
+  try {
+    const { blockerID, blockedID, reason } = req.body;
 
+    // Validate input
+    if (!blockerID || !blockedID) {
+      return res.status(400).json({ error: 'Both blockerID and blockedID are required' });
+    }
+
+    if (blockerID === blockedID) {
+      return res.status(400).json({ error: 'Cannot block yourself' });
+    }
+
+    // Check if already blocked
+    const [existing] = await connection.execute(
+      `SELECT ID FROM BlockedUsers WHERE BlockerID = ? AND BlockedID = ?`,
+      [blockerID, blockedID]
+    );
+
+    if (existing.length > 0) {
+      return res.status(400).json({ error: 'User is already blocked' });
+    }
+
+    // Insert block record
+    await connection.execute(
+      `INSERT INTO BlockedUsers (BlockerID, BlockedID, Reason, DateCreated) 
+       VALUES (?, ?, ?, NOW())`,
+      [blockerID, blockedID, reason || null]
+    );
+
+    // Remove any existing match between these users
+    await connection.execute(
+      `DELETE FROM \`Match\` 
+       WHERE (User1ID = ? AND User2ID = ?) 
+       OR (User1ID = ? AND User2ID = ?)`,
+      [Math.min(blockerID, blockedID), Math.max(blockerID, blockedID), 
+       Math.min(blockerID, blockedID), Math.max(blockerID, blockedID)]
+    );
+
+    // Remove any swipes between these users
+    await connection.execute(
+      `DELETE FROM Swipe 
+       WHERE (SwiperID = ? AND SwipedID = ?) 
+       OR (SwiperID = ? AND SwipedID = ?)`,
+      [blockerID, blockedID, blockedID, blockerID]
+    );
+
+    res.json({ message: 'User blocked successfully' });
+
+  } catch (err) {
+    console.error('Error blocking user:', err);
+    res.status(500).json({ error: 'Failed to block user' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 2. Unblock a user
+app.delete('/api/block', async (req, res) => {
+  const connection = await db.connect();
+  try {
+    const { blockerID, blockedID } = req.body;
+
+    // Validate input
+    if (!blockerID || !blockedID) {
+      return res.status(400).json({ error: 'Both blockerID and blockedID are required' });
+    }
+
+    // Remove block record
+    const [result] = await connection.execute(
+      `DELETE FROM BlockedUsers WHERE BlockerID = ? AND BlockedID = ?`,
+      [blockerID, blockedID]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Block relationship not found' });
+    }
+
+    res.json({ message: 'User unblocked successfully' });
+
+  } catch (err) {
+    console.error('Error unblocking user:', err);
+    res.status(500).json({ error: 'Failed to unblock user' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 3. Get blocked users list for a user
+app.get('/api/blocked/:userId', async (req, res) => {
+  const userId = req.params.userId;
+  const connection = await db.connect();
+  
+  try {
+    const [blockedUsers] = await connection.execute(
+      `SELECT 
+        bu.ID as blockId,
+        bu.BlockedID as blockedUserId,
+        bu.DateCreated as blockedDate,
+        bu.Reason as blockReason,
+        u.Username as blockedUserName,
+        p.Picture as blockedUserPicture
+      FROM BlockedUsers bu
+      JOIN User u ON bu.BlockedID = u.ID
+      LEFT JOIN Pictures p ON p.UserID = u.ID AND p.IsProfilePicture = TRUE
+      WHERE bu.BlockerID = ?
+      ORDER BY bu.DateCreated DESC`,
+      [userId]
+    );
+
+    const formattedBlockedUsers = blockedUsers.map(user => ({
+      blockId: user.blockId,
+      user: {
+        id: user.blockedUserId,
+        name: user.blockedUserName,
+        picture: user.blockedUserPicture 
+          ? (user.blockedUserPicture.startsWith('http') 
+              ? user.blockedUserPicture 
+              : `http://localhost:3000${user.blockedUserPicture}`)
+          : null
+      },
+      blockedDate: user.blockedDate,
+      reason: user.blockReason
+    }));
+
+    res.json(formattedBlockedUsers);
+
+  } catch (err) {
+    console.error('Error fetching blocked users:', err);
+    res.status(500).json({ error: 'Failed to fetch blocked users' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 4. Check if user is blocked
+app.get('/api/block-status/:blockerID/:blockedID', async (req, res) => {
+  const { blockerID, blockedID } = req.params;
+  const connection = await db.connect();
+  
+  try {
+    const [result] = await connection.execute(
+      `SELECT ID FROM BlockedUsers WHERE BlockerID = ? AND BlockedID = ?`,
+      [blockerID, blockedID]
+    );
+
+    res.json({ isBlocked: result.length > 0 });
+
+  } catch (err) {
+    console.error('Error checking block status:', err);
+    res.status(500).json({ error: 'Failed to check block status' });
+  } finally {
+    await connection.end();
+  }
+});
+// -----------------------------------------------------------------------------------------------------
 // MESSAGING ENDPOINTS:
+// -----------------------------------------------------------------------------------------------------
 // 1. Get conversations for a user
 app.get('/api/conversations/:userId', async (req, res) => {
   const userId = req.params.userId;
@@ -853,7 +1040,13 @@ app.get('/api/conversations/:userId', async (req, res) => {
         ELSE m.User1ID 
       END
       LEFT JOIN Pictures p ON p.UserID = u.ID AND p.IsProfilePicture = TRUE
-      WHERE m.User1ID = ? OR m.User2ID = ?
+      WHERE (m.User1ID = ? OR m.User2ID = ?)
+      AND u.ID NOT IN (
+        SELECT BlockedID FROM BlockedUsers WHERE BlockerID = ?
+      )
+      AND u.ID NOT IN (
+        SELECT BlockerID FROM BlockedUsers WHERE BlockedID = ?
+      )
       ORDER BY 
         CASE 
           WHEN (SELECT Timestamp FROM Messages WHERE ConversationID = c.ID ORDER BY Timestamp DESC LIMIT 1) IS NULL 
@@ -862,7 +1055,7 @@ app.get('/api/conversations/:userId', async (req, res) => {
         END,
         (SELECT Timestamp FROM Messages WHERE ConversationID = c.ID ORDER BY Timestamp DESC LIMIT 1) DESC,
         c.DateCreated DESC`,
-      [userId, userId, userId, userId, userId, userId]
+      [userId, userId, userId, userId, userId, userId, userId, userId]
     );
 
     const formattedConversations = conversations.map(conv => ({
@@ -947,9 +1140,9 @@ app.post('/api/conversations/:conversationId/messages', async (req, res) => {
   const connection = await db.connect();
   
   try {
-    // Validate that the sender is part of this conversation
+    // Validate that the sender is part of this conversation and not blocked
     const [validation] = await connection.execute(
-      `SELECT m.ID 
+      `SELECT m.ID, m.User1ID, m.User2ID
        FROM Conversation c
        JOIN \`Match\` m ON c.MatchID = m.ID
        WHERE c.ID = ? 
@@ -959,6 +1152,21 @@ app.post('/api/conversations/:conversationId/messages', async (req, res) => {
 
     if (validation.length === 0) {
       return res.status(403).json({ error: 'You are not part of this conversation' });
+    }
+
+    // Get the other user's ID
+    const otherUserId = validation[0].User1ID === senderId ? validation[0].User2ID : validation[0].User1ID;
+
+    // Check if either user has blocked the other
+    const [blockCheck] = await connection.execute(
+      `SELECT ID FROM BlockedUsers 
+       WHERE (BlockerID = ? AND BlockedID = ?) 
+       OR (BlockerID = ? AND BlockedID = ?)`,
+      [senderId, otherUserId, otherUserId, senderId]
+    );
+
+    if (blockCheck.length > 0) {
+      return res.status(403).json({ error: 'Cannot send message to blocked user' });
     }
 
     // Insert the message
@@ -1044,8 +1252,9 @@ app.get('/api/matches/:matchId/conversation', async (req, res) => {
     await connection.end();
   }
 });
-
+// -----------------------------------------------------------------------------------------------------
 // ADMIN ENDPOINTS:
+// -----------------------------------------------------------------------------------------------------
 // 1. User overview
 app.get('/api/admin/users', async (req, res) => {
   const connection = await db.connect();
