@@ -454,7 +454,7 @@ app.put('/api/preferences/:id', async (req, res) => {
 // -----------------------------------------------------------------------------------------------------
 // SWIPE ENDPOINTS:
 // -----------------------------------------------------------------------------------------------------
-// 1. Load users for swiping (excludes already swiped users and blocked users) - UPDATED with blocking and location
+// 1. Load users for swiping (excludes already swiped users and blocked users) - UPDATED with blocking, location and verification
 app.get('/api/users/swipe/:id', async (req, res) => {
   const userId = req.params.id;
   const connection = await db.connect();
@@ -508,9 +508,9 @@ app.get('/api/users/swipe/:id', async (req, res) => {
       queryParams.push(minAge, maxAge);
     }
 
-    // Get users that haven't been swiped yet, filtered by preferences and excluding blocked users
+    // Get users that haven't been swiped yet, filtered by preferences and excluding blocked users - now including verification status
     const [userRows] = await connection.execute(
-      `SELECT u.ID, u.Username, u.DateOfBirth, u.Bio, u.Latitude, u.Longitude
+      `SELECT u.ID, u.Username, u.DateOfBirth, u.Bio, u.Latitude, u.Longitude, u.Verified
        FROM User u
        WHERE u.ID != ? 
        AND u.Role = 'user' 
@@ -528,7 +528,7 @@ app.get('/api/users/swipe/:id', async (req, res) => {
        )
        ${genderFilter}
        ${ageFilter}
-       ORDER BY u.CreatedAt DESC`,
+       ORDER BY u.Verified DESC, u.CreatedAt DESC`, // Sort verified users first
       queryParams
     );
 
@@ -566,6 +566,7 @@ app.get('/api/users/swipe/:id', async (req, res) => {
         name: user.Username,
         age,
         bio: user.Bio || 'No bio yet',
+        verified: user.Verified, // Include verification status
         latitude: user.Latitude,
         longitude: user.Longitude,
         distance: distance,
@@ -1252,15 +1253,250 @@ app.get('/api/matches/:matchId/conversation', async (req, res) => {
     await connection.end();
   }
 });
+
+// -----------------------------------------------------------------------------------------------------
+// REPORT ENDPOINTS:
+// -----------------------------------------------------------------------------------------------------
+// 1. Report a user
+app.post('/api/report', async (req, res) => {
+  const connection = await db.connect();
+  try {
+    const { reporterID, reportedID, reason } = req.body;
+
+    // Validate input
+    if (!reporterID || !reportedID || !reason) {
+      return res.status(400).json({ error: 'ReporterID, reportedID, and reason are required' });
+    }
+
+    if (reporterID === reportedID) {
+      return res.status(400).json({ error: 'Cannot report yourself' });
+    }
+
+    // Check if user has already reported this person
+    const [existing] = await connection.execute(
+      `SELECT ID FROM UserReports WHERE ReporterID = ? AND ReportedID = ?`,
+      [reporterID, reportedID]
+    );
+
+    if (existing.length > 0) {
+      return res.status(400).json({ error: 'You have already reported this user' });
+    }
+
+    // Insert report record
+    await connection.execute(
+      `INSERT INTO UserReports (ReporterID, ReportedID, Reason, Status, DateCreated) 
+       VALUES (?, ?, ?, 'Pending', NOW())`,
+      [reporterID, reportedID, reason]
+    );
+
+    res.json({ message: 'User reported successfully' });
+
+  } catch (err) {
+    console.error('Error reporting user:', err);
+    res.status(500).json({ error: 'Failed to report user' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 2. Get reports for admin (paginated)
+app.get('/api/admin/reports', async (req, res) => {
+  const connection = await db.connect();
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 20;
+  const offset = (page - 1) * limit;
+  const status = req.query.status || 'all'; // 'all', 'Pending', 'Reviewed', 'Dismissed'
+  
+  try {
+    let statusFilter = '';
+    let queryParams = [limit, offset];
+    
+    if (status !== 'all') {
+      statusFilter = 'WHERE ur.Status = ?';
+      queryParams = [status, limit, offset];
+    }
+
+    // Get reports with user details
+    const [reports] = await connection.execute(
+      `SELECT 
+        ur.ID as reportId,
+        ur.Reason,
+        ur.Status,
+        ur.DateCreated as reportDate,
+        ur.DateReviewed,
+        reporter.ID as reporterID,
+        reporter.Username as reporterName,
+        reporter.Email as reporterEmail,
+        reported.ID as reportedID,
+        reported.Username as reportedName,
+        reported.Email as reportedEmail,
+        reported.Active as reportedActive,
+        reported.Verified as reportedVerified,
+        rp.Picture as reportedPicture
+      FROM UserReports ur
+      JOIN User reporter ON ur.ReporterID = reporter.ID
+      JOIN User reported ON ur.ReportedID = reported.ID
+      LEFT JOIN Pictures rp ON rp.UserID = reported.ID AND rp.IsProfilePicture = TRUE
+      ${statusFilter}
+      ORDER BY ur.DateCreated DESC
+      LIMIT ? OFFSET ?`,
+      queryParams
+    );
+
+    // Get total count for pagination
+    let countQuery = 'SELECT COUNT(*) as total FROM UserReports ur';
+    let countParams = [];
+    
+    if (status !== 'all') {
+      countQuery += ' WHERE ur.Status = ?';
+      countParams = [status];
+    }
+    
+    const [countResult] = await connection.execute(countQuery, countParams);
+    const totalReports = countResult[0].total;
+    const totalPages = Math.ceil(totalReports / limit);
+
+    const formattedReports = reports.map(report => ({
+      reportId: report.reportId,
+      reason: report.Reason,
+      status: report.Status,
+      reportDate: report.reportDate,
+      dateReviewed: report.DateReviewed,
+      reporter: {
+        id: report.reporterID,
+        name: report.reporterName,
+        email: report.reporterEmail
+      },
+      reported: {
+        id: report.reportedID,
+        name: report.reportedName,
+        email: report.reportedEmail,
+        active: report.reportedActive,
+        verified: report.reportedVerified,
+        picture: report.reportedPicture 
+          ? (report.reportedPicture.startsWith('http') 
+              ? report.reportedPicture 
+              : `http://localhost:3000${report.reportedPicture}`)
+          : null
+      }
+    }));
+
+    res.json({
+      reports: formattedReports,
+      pagination: {
+        currentPage: page,
+        totalPages: totalPages,
+        totalReports: totalReports,
+        limit: limit
+      }
+    });
+
+  } catch (err) {
+    console.error('Error fetching reports:', err);
+    res.status(500).json({ error: 'Failed to fetch reports' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 3. Update report status (admin action)
+app.put('/api/admin/reports/:reportId', async (req, res) => {
+  const reportId = req.params.reportId;
+  const { status, adminID } = req.body; // status: 'Reviewed' or 'Dismissed'
+  const connection = await db.connect();
+  
+  try {
+    // Validate status
+    if (!['Reviewed', 'Dismissed'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status. Must be Reviewed or Dismissed' });
+    }
+
+    // Update report status
+    const [result] = await connection.execute(
+      `UPDATE UserReports 
+       SET Status = ?, DateReviewed = NOW(), ReviewedByAdminID = ?
+       WHERE ID = ?`,
+      [status, adminID || null, reportId]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    res.json({ message: `Report marked as ${status.toLowerCase()}` });
+
+  } catch (err) {
+    console.error('Error updating report status:', err);
+    res.status(500).json({ error: 'Failed to update report status' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 4. Get report statistics for admin dashboard
+app.get('/api/admin/reports/stats', async (req, res) => {
+  const connection = await db.connect();
+  
+  try {
+    // Get counts by status
+    const [statusCounts] = await connection.execute(
+      `SELECT 
+        Status,
+        COUNT(*) as count
+      FROM UserReports
+      GROUP BY Status`
+    );
+
+    // Get recent reports count (last 7 days)
+    const [recentCount] = await connection.execute(
+      `SELECT COUNT(*) as count
+      FROM UserReports
+      WHERE DateCreated >= DATE_SUB(NOW(), INTERVAL 7 DAY)`
+    );
+
+    // Get most reported users
+    const [mostReported] = await connection.execute(
+      `SELECT 
+        u.ID,
+        u.Username,
+        u.Email,
+        COUNT(ur.ID) as reportCount
+      FROM UserReports ur
+      JOIN User u ON ur.ReportedID = u.ID
+      WHERE ur.Status = 'Pending'
+      GROUP BY u.ID, u.Username, u.Email
+      ORDER BY reportCount DESC
+      LIMIT 5`
+    );
+
+    const stats = {
+      statusCounts: statusCounts.reduce((acc, curr) => {
+        acc[curr.Status] = curr.count;
+        return acc;
+      }, {}),
+      recentReports: recentCount[0].count,
+      mostReportedUsers: mostReported
+    };
+
+    res.json(stats);
+
+  } catch (err) {
+    console.error('Error fetching report statistics:', err);
+    res.status(500).json({ error: 'Failed to fetch report statistics' });
+  } finally {
+    await connection.end();
+  }
+});
+
 // -----------------------------------------------------------------------------------------------------
 // ADMIN ENDPOINTS:
 // -----------------------------------------------------------------------------------------------------
-// 1. User overview
+// 1. User overview - UPDATED to show verification status
 app.get('/api/admin/users', async (req, res) => {
   const connection = await db.connect();
   try {
     const [rows] = await connection.execute(
-      'SELECT ID, Username, Email, Role, Active, Verified, CreatedAt FROM User'
+      'SELECT ID, Username, Email, Role, Active, Verified, CreatedAt FROM User ORDER BY Verified DESC, CreatedAt DESC'
     );
     res.json(rows);
   } catch (err) {
