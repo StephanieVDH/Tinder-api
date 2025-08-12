@@ -184,6 +184,8 @@ app.get('/api/profile/:id', async (req, res) => {
         u.PhoneNumber,
         u.Bio,
         u.GenderID,
+        u.Latitude,
+        u.Longitude,
         g.Name as GenderName
       FROM User u
       LEFT JOIN Gender g ON u.GenderID = g.ID
@@ -449,11 +451,25 @@ app.put('/api/preferences/:id', async (req, res) => {
   }
 });
 
-// UPDATED: Load users for swiping with multiple gender preferences
+// SWIPE ENDPOINTS:
+// 1. Load users for swiping (excludes already swiped users) - UPDATED with location and distance filtering
 app.get('/api/users/swipe/:id', async (req, res) => {
   const userId = req.params.id;
   const connection = await db.connect();
   try {
+    // Get current user's location first
+    const [currentUserLocation] = await connection.execute(
+      `SELECT Latitude, Longitude FROM User WHERE ID = ?`,
+      [userId]
+    );
+
+    if (currentUserLocation.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const userLat = currentUserLocation[0].Latitude;
+    const userLng = currentUserLocation[0].Longitude;
+
     // Get user's preferred genders
     const [preferredGenders] = await connection.execute(
       `SELECT pg.GenderID 
@@ -490,13 +506,15 @@ app.get('/api/users/swipe/:id', async (req, res) => {
       queryParams.push(minAge, maxAge);
     }
 
-    // Get users that haven't been swiped yet, filtered by preferences
+    // Get users that haven't been swiped yet, filtered by preferences and including location data
     const [userRows] = await connection.execute(
-      `SELECT u.ID, u.Username, u.DateOfBirth, u.Bio
+      `SELECT u.ID, u.Username, u.DateOfBirth, u.Bio, u.Latitude, u.Longitude
        FROM User u
        WHERE u.ID != ? 
        AND u.Role = 'user' 
        AND u.Active = TRUE
+       AND u.Latitude IS NOT NULL 
+       AND u.Longitude IS NOT NULL
        AND u.ID NOT IN (
          SELECT SwipedID FROM Swipe WHERE SwiperID = ?
        )
@@ -514,26 +532,41 @@ app.get('/api/users/swipe/:id', async (req, res) => {
     const picturesMap = {};
     pictureRows.forEach(pic => {
       if (!picturesMap[pic.UserID]) picturesMap[pic.UserID] = [];
-      // Fix: Add full URL for pictures
+      // Add full URL for pictures
       const fullUrl = pic.Picture.startsWith('http') 
         ? pic.Picture 
         : `http://localhost:3000${pic.Picture}`;
       picturesMap[pic.UserID].push(fullUrl);
     });
 
-    const users = userRows.map(user => {
+    // Calculate distances and filter by MaxDistance preference
+    const maxDistance = userPrefs.length > 0 ? (userPrefs[0].MaxDistance || 50) : 50;
+    
+    const usersWithDistance = userRows.map(user => {
+      // Calculate distance using Haversine formula
+      const distance = calculateDistance(
+        userLat, 
+        userLng, 
+        parseFloat(user.Latitude), 
+        parseFloat(user.Longitude)
+      );
+
       const age = new Date().getFullYear() - new Date(user.DateOfBirth).getFullYear();
+      
       return {
         id: user.ID,
         name: user.Username,
         age,
         bio: user.Bio || 'No bio yet',
-        picture: picturesMap[user.ID]?.[0] || 'https://via.placeholder.com/300x300?text=User',
-        pictures: picturesMap[user.ID] || ['https://via.placeholder.com/300x300?text=User']
+        latitude: user.Latitude,
+        longitude: user.Longitude,
+        distance: distance,
+        picture: picturesMap[user.ID]?.[0],
+        pictures: picturesMap[user.ID] || []
       };
-    });
+    }).filter(user => user.distance <= maxDistance); // Filter by distance preference
 
-    res.json(users);
+    res.json(usersWithDistance);
 
   } catch (err) {
     console.error(err);
@@ -543,112 +576,23 @@ app.get('/api/users/swipe/:id', async (req, res) => {
   }
 });
 
-// NEW: Get user's gender preference statistics
-app.get('/api/preferences/:id/stats', async (req, res) => {
-  const userId = req.params.id;
-  const connection = await db.connect();
-  
-  try {
-    // Get preferred genders with counts
-    const [preferredGendersStats] = await connection.execute(
-      `SELECT 
-        g.Name as GenderName,
-        g.ID as GenderID,
-        COUNT(DISTINCT u.ID) as AvailableUsers
-       FROM PreferredGender pg
-       JOIN Gender g ON pg.GenderID = g.ID
-       LEFT JOIN User u ON u.GenderID = g.ID 
-         AND u.ID != ? 
-         AND u.Active = TRUE 
-         AND u.Role = 'user'
-         AND u.ID NOT IN (SELECT SwipedID FROM Swipe WHERE SwiperID = ?)
-       WHERE pg.UserID = ?
-       GROUP BY g.ID, g.Name`,
-      [userId, userId, userId]
-    );
+// Helper function to calculate distance between two points using Haversine formula
+function calculateDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Radius of the Earth in kilometers
+  const dLat = deg2rad(lat2 - lat1);
+  const dLon = deg2rad(lon2 - lon1);
+  const a = 
+    Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) * 
+    Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  const distance = R * c; // Distance in kilometers
+  return distance;
+}
 
-    // Get total available users matching preferences
-    const [totalAvailable] = await connection.execute(
-      `SELECT COUNT(DISTINCT u.ID) as total
-       FROM User u
-       WHERE u.ID != ? 
-       AND u.Role = 'user' 
-       AND u.Active = TRUE
-       AND u.ID NOT IN (SELECT SwipedID FROM Swipe WHERE SwiperID = ?)
-       AND u.GenderID IN (SELECT GenderID FROM PreferredGender WHERE UserID = ?)`,
-      [userId, userId, userId]
-    );
-
-    res.json({
-      preferredGenders: preferredGendersStats,
-      totalAvailableUsers: totalAvailable[0]?.total || 0
-    });
-
-  } catch (err) {
-    console.error('Error fetching preference stats:', err);
-    res.status(500).json({ error: 'Failed to fetch preference statistics' });
-  } finally {
-    await connection.end();
-  }
-});
-
-
-// SWIPE ENDPOINTS:
-// 1. Load users for swiping (excludes already swiped users)
-app.get('/api/users/swipe/:id', async (req, res) => {
-  const userId = req.params.id;
-  const connection = await db.connect();
-  try {
-    // Get users that haven't been swiped yet
-    const [userRows] = await connection.execute(
-      `SELECT u.ID, u.Username, u.DateOfBirth, u.Bio
-       FROM User u
-       WHERE u.ID != ? 
-       AND u.Role = 'user' 
-       AND u.Active = TRUE
-       AND u.ID NOT IN (
-         SELECT SwipedID FROM Swipe WHERE SwiperID = ?
-       )
-       ORDER BY u.CreatedAt DESC`,
-      [userId, userId]
-    );
-
-    const [pictureRows] = await connection.execute(
-      `SELECT UserID, Picture FROM Pictures WHERE IsProfilePicture = TRUE`
-    );
-
-    // Group pictures by userID
-    const picturesMap = {};
-    pictureRows.forEach(pic => {
-      if (!picturesMap[pic.UserID]) picturesMap[pic.UserID] = [];
-      // Fix: Add full URL for pictures
-      const fullUrl = pic.Picture.startsWith('http') 
-        ? pic.Picture 
-        : `http://localhost:3000${pic.Picture}`;
-      picturesMap[pic.UserID].push(fullUrl);
-    });
-
-    const users = userRows.map(user => {
-      const age = new Date().getFullYear() - new Date(user.DateOfBirth).getFullYear();
-      return {
-        id: user.ID,
-        name: user.Username,
-        age,
-        bio: user.Bio || 'No bio yet',
-        picture: picturesMap[user.ID]?.[0] || 'https://via.placeholder.com/300x300?text=User',
-        pictures: picturesMap[user.ID] || ['https://via.placeholder.com/300x300?text=User']
-      };
-    });
-
-    res.json(users);
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to load users' });
-  } finally {
-    await connection.end();
-  }
-});
+function deg2rad(deg) {
+  return deg * (Math.PI/180);
+}
 
 // 2. Record a swipe (like or dislike)
 app.post('/api/swipe', async (req, res) => {
@@ -760,7 +704,7 @@ app.get('/api/matches/:id', async (req, res) => {
           ? (match.matchedUserPicture.startsWith('http') 
               ? match.matchedUserPicture 
               : `http://localhost:3000${match.matchedUserPicture}`)
-          : 'https://via.placeholder.com/300x300?text=User'
+          : null
       }
     }));
 
@@ -819,6 +763,54 @@ app.get('/api/swipe-stats/:id', async (req, res) => {
   }
 });
 
+// NEW: Get user's gender preference statistics
+app.get('/api/preferences/:id/stats', async (req, res) => {
+  const userId = req.params.id;
+  const connection = await db.connect();
+  
+  try {
+    // Get preferred genders with counts
+    const [preferredGendersStats] = await connection.execute(
+      `SELECT 
+        g.Name as GenderName,
+        g.ID as GenderID,
+        COUNT(DISTINCT u.ID) as AvailableUsers
+       FROM PreferredGender pg
+       JOIN Gender g ON pg.GenderID = g.ID
+       LEFT JOIN User u ON u.GenderID = g.ID 
+         AND u.ID != ? 
+         AND u.Active = TRUE 
+         AND u.Role = 'user'
+         AND u.ID NOT IN (SELECT SwipedID FROM Swipe WHERE SwiperID = ?)
+       WHERE pg.UserID = ?
+       GROUP BY g.ID, g.Name`,
+      [userId, userId, userId]
+    );
+
+    // Get total available users matching preferences
+    const [totalAvailable] = await connection.execute(
+      `SELECT COUNT(DISTINCT u.ID) as total
+       FROM User u
+       WHERE u.ID != ? 
+       AND u.Role = 'user' 
+       AND u.Active = TRUE
+       AND u.ID NOT IN (SELECT SwipedID FROM Swipe WHERE SwiperID = ?)
+       AND u.GenderID IN (SELECT GenderID FROM PreferredGender WHERE UserID = ?)`,
+      [userId, userId, userId]
+    );
+
+    res.json({
+      preferredGenders: preferredGendersStats,
+      totalAvailableUsers: totalAvailable[0]?.total || 0
+    });
+
+  } catch (err) {
+    console.error('Error fetching preference stats:', err);
+    res.status(500).json({ error: 'Failed to fetch preference statistics' });
+  } finally {
+    await connection.end();
+  }
+});
 
 // MESSAGING ENDPOINTS:
 // 1. Get conversations for a user
@@ -883,7 +875,7 @@ app.get('/api/conversations/:userId', async (req, res) => {
           ? (conv.otherUserPicture.startsWith('http') 
               ? conv.otherUserPicture 
               : `http://localhost:3000${conv.otherUserPicture}`)
-          : 'https://via.placeholder.com/300x300?text=User'
+          : null
       },
       lastMessage: conv.lastMessage,
       lastMessageTime: conv.lastMessageTime,
@@ -1152,11 +1144,6 @@ app.delete('/api/admin/users/:id', async (req, res) => {
     await connection.end();
   }
 });
-
-
-
-
-
 
 // Starten van de server en op welke port de server moet luisteren, NIET VERWIJDEREN
 app.listen(3000, () => {
