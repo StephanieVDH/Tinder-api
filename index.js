@@ -874,31 +874,67 @@ app.post('/api/block', async (req, res) => {
       return res.status(400).json({ error: 'User is already blocked' });
     }
 
-    // Insert block record
-    await connection.execute(
-      `INSERT INTO BlockedUsers (BlockerID, BlockedID, Reason, DateCreated) 
-       VALUES (?, ?, ?, NOW())`,
-      [blockerID, blockedID, reason || null]
-    );
+    // Start transaction for data consistency
+    await connection.beginTransaction();
 
-    // Remove any existing match between these users
-    await connection.execute(
-      `DELETE FROM \`Match\` 
-       WHERE (User1ID = ? AND User2ID = ?) 
-       OR (User1ID = ? AND User2ID = ?)`,
-      [Math.min(blockerID, blockedID), Math.max(blockerID, blockedID), 
-       Math.min(blockerID, blockedID), Math.max(blockerID, blockedID)]
-    );
+    try {
+      // Insert block record first
+      await connection.execute(
+        `INSERT INTO BlockedUsers (BlockerID, BlockedID, Reason, DateCreated) 
+         VALUES (?, ?, ?, NOW())`,
+        [blockerID, blockedID, reason || null]
+      );
 
-    // Remove any swipes between these users
-    await connection.execute(
-      `DELETE FROM Swipe 
-       WHERE (SwiperID = ? AND SwipedID = ?) 
-       OR (SwiperID = ? AND SwipedID = ?)`,
-      [blockerID, blockedID, blockedID, blockerID]
-    );
+      // Find matches between these users
+      const [matchesToDelete] = await connection.execute(
+        `SELECT ID FROM \`Match\` 
+         WHERE (User1ID = ? AND User2ID = ?) 
+         OR (User1ID = ? AND User2ID = ?)`,
+        [Math.min(blockerID, blockedID), Math.max(blockerID, blockedID), 
+         Math.min(blockerID, blockedID), Math.max(blockerID, blockedID)]
+      );
 
-    res.json({ message: 'User blocked successfully' });
+      // Delete related data in the correct order (respecting foreign key constraints)
+      for (const match of matchesToDelete) {
+        // 1. First delete messages in conversations related to this match
+        await connection.execute(
+          `DELETE m FROM Messages m 
+           JOIN Conversation c ON m.ConversationID = c.ID 
+           WHERE c.MatchID = ?`,
+          [match.ID]
+        );
+
+        // 2. Then delete conversations related to this match
+        await connection.execute(
+          `DELETE FROM Conversation WHERE MatchID = ?`,
+          [match.ID]
+        );
+
+        // 3. Finally delete the match itself
+        await connection.execute(
+          `DELETE FROM \`Match\` WHERE ID = ?`,
+          [match.ID]
+        );
+      }
+
+      // Remove any swipes between these users
+      await connection.execute(
+        `DELETE FROM Swipe 
+         WHERE (SwiperID = ? AND SwipedID = ?) 
+         OR (SwiperID = ? AND SwipedID = ?)`,
+        [blockerID, blockedID, blockedID, blockerID]
+      );
+
+      // Commit the transaction
+      await connection.commit();
+
+      res.json({ message: 'User blocked successfully' });
+
+    } catch (transactionError) {
+      // Rollback the transaction if any error occurs
+      await connection.rollback();
+      throw transactionError;
+    }
 
   } catch (err) {
     console.error('Error blocking user:', err);
