@@ -237,8 +237,93 @@ app.get('/api/profile/:id', async (req, res) => {
   }
 });
 
-// 2. Update user profile
-app.put('/api/profile/:id', upload.single('profilePicture'), async (req, res) => {
+// Add these endpoints to your index.js file after the existing profile endpoints
+
+// 1. Get all pictures for a user (ADD THIS NEW ENDPOINT)
+app.get('/api/pictures/:userId', async (req, res) => {
+  const userId = req.params.userId;
+  const connection = await db.connect();
+  
+  try {
+    // Get all non-profile pictures for the user
+    const [pictureRows] = await connection.execute(
+      `SELECT 
+        ID,
+        Picture,
+        IsProfilePicture
+      FROM Pictures 
+      WHERE UserID = ? AND IsProfilePicture = FALSE
+      ORDER BY ID ASC`,
+      [userId]
+    );
+
+    // Format pictures with full URLs
+    const pictures = pictureRows.map(pic => ({
+      id: pic.ID,
+      url: pic.Picture.startsWith('http') 
+        ? pic.Picture 
+        : `http://localhost:3000${pic.Picture}`,
+      isProfilePicture: pic.IsProfilePicture
+    }));
+
+    res.json({ pictures });
+
+  } catch (err) {
+    console.error('Error fetching pictures:', err);
+    res.status(500).json({ error: 'Failed to fetch pictures' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 2. Delete a specific picture (ADD THIS NEW ENDPOINT)
+app.delete('/api/pictures/:pictureId', async (req, res) => {
+  const pictureId = req.params.pictureId;
+  const connection = await db.connect();
+  
+  try {
+    // Check if picture exists and is not a profile picture
+    const [pictureCheck] = await connection.execute(
+      `SELECT ID, Picture, IsProfilePicture FROM Pictures WHERE ID = ?`,
+      [pictureId]
+    );
+
+    if (pictureCheck.length === 0) {
+      return res.status(404).json({ error: 'Picture not found' });
+    }
+
+    if (pictureCheck[0].IsProfilePicture) {
+      return res.status(400).json({ error: 'Cannot delete profile picture using this endpoint' });
+    }
+
+    // Delete the picture record
+    const [result] = await connection.execute(
+      `DELETE FROM Pictures WHERE ID = ? AND IsProfilePicture = FALSE`,
+      [pictureId]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Picture not found or cannot be deleted' });
+    }
+
+    res.json({ message: 'Picture deleted successfully' });
+
+  } catch (err) {
+    console.error('Error deleting picture:', err);
+    res.status(500).json({ error: 'Failed to delete picture' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 3. REPLACE your existing profile update endpoint with this updated version:
+// Find this line in your code: app.put('/api/profile/:id', upload.single('profilePicture'), async (req, res) => {
+// And replace the entire endpoint with this updated version:
+
+app.put('/api/profile/:id', upload.fields([
+  { name: 'profilePicture', maxCount: 1 },
+  { name: 'additionalPictures', maxCount: 5 }
+]), async (req, res) => {
   const userId = req.params.id;
   const connection = await db.connect();
   
@@ -257,8 +342,9 @@ app.put('/api/profile/:id', upload.single('profilePicture'), async (req, res) =>
     );
 
     // Handle profile picture upload if provided
-    if (req.file) {
-      const imageUrl = `/uploads/${req.file.filename}`;
+    if (req.files && req.files.profilePicture && req.files.profilePicture[0]) {
+      const profileFile = req.files.profilePicture[0];
+      const imageUrl = `/uploads/${profileFile.filename}`;
       
       // First, set all existing pictures to not be profile picture
       await connection.execute(
@@ -291,6 +377,39 @@ app.put('/api/profile/:id', upload.single('profilePicture'), async (req, res) =>
           [imageUrl, userId]
         );
       }
+    }
+
+    // Handle additional pictures upload if provided
+    if (req.files && req.files.additionalPictures) {
+      const additionalFiles = req.files.additionalPictures;
+      
+      // Check current number of non-profile pictures
+      const [currentPicturesCount] = await connection.execute(
+        `SELECT COUNT(*) as count FROM Pictures 
+         WHERE UserID = ? AND IsProfilePicture = FALSE`,
+        [userId]
+      );
+
+      const currentCount = currentPicturesCount[0].count;
+      const newPicturesCount = additionalFiles.length;
+      
+      if (currentCount + newPicturesCount > 5) {
+        return res.status(400).json({ 
+          error: `Cannot upload ${newPicturesCount} pictures. You can only have 5 additional pictures maximum.` 
+        });
+      }
+
+      // Insert new additional pictures
+      const insertPromises = additionalFiles.map(file => {
+        const imageUrl = `/uploads/${file.filename}`;
+        return connection.execute(
+          `INSERT INTO Pictures (Picture, UserID, IsProfilePicture) 
+           VALUES (?, ?, FALSE)`,
+          [imageUrl, userId]
+        );
+      });
+
+      await Promise.all(insertPromises);
     }
 
     res.json({ message: 'Profile updated successfully' });
@@ -459,6 +578,7 @@ app.put('/api/preferences/:id', async (req, res) => {
     await connection.end();
   }
 });
+
 // -----------------------------------------------------------------------------------------------------
 // SWIPE ENDPOINTS:
 // -----------------------------------------------------------------------------------------------------
@@ -694,7 +814,7 @@ app.post('/api/swipe', async (req, res) => {
   }
 });
 
-// 3. Get user's matches (exclude blocked users)
+// 3. Get user's matches (exclude blocked users) - UPDATED to include verification
 app.get('/api/matches/:id', async (req, res) => {
   const userId = req.params.id;
   const connection = await db.connect();
@@ -710,6 +830,10 @@ app.get('/api/matches/:id', async (req, res) => {
         END as matchedUserId,
         u.Username as matchedUserName,
         u.Bio as matchedUserBio,
+        u.Verified as matchedUserVerified,
+        u.DateOfBirth as matchedUserDOB,
+        u.Latitude as matchedUserLat,
+        u.Longitude as matchedUserLng,
         p.Picture as matchedUserPicture
       FROM \`Match\` m
       JOIN User u ON u.ID = CASE 
@@ -735,6 +859,10 @@ app.get('/api/matches/:id', async (req, res) => {
         id: match.matchedUserId,
         name: match.matchedUserName,
         bio: match.matchedUserBio,
+        verified: match.matchedUserVerified || false, // Include verification status
+        dateOfBirth: match.matchedUserDOB,
+        latitude: match.matchedUserLat,
+        longitude: match.matchedUserLng,
         picture: match.matchedUserPicture 
           ? (match.matchedUserPicture.startsWith('http') 
               ? match.matchedUserPicture 
