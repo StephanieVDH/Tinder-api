@@ -132,9 +132,9 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).json({ error: 'Email and password are required.' });
     }
 
-    // Fetch user by email
+    // Fetch user by email (don't filter by Active status yet)
     const [rows] = await connection.execute(
-      'SELECT ID, Email, Password, Role FROM `User` WHERE Email = ? AND Active = TRUE',
+      'SELECT ID, Email, Password, Role, Active FROM `User` WHERE Email = ?',
       [email]
     );
 
@@ -144,10 +144,18 @@ app.post('/api/login', async (req, res) => {
 
     const user = rows[0];
 
-    // Verify password
+    // Verify password first
     const isMatch = await bcrypt.compare(password, user.Password);
     if (!isMatch) {
       return res.status(401).json({ error: 'Invalid email or password.' });
+    }
+
+    // Check if user is banned (after password verification)
+    if (!user.Active) {
+      return res.status(403).json({ 
+        error: 'Your account has been banned. Please contact support for assistance.',
+        banned: true 
+      });
     }
 
     // Success - Return user info
@@ -1257,72 +1265,16 @@ app.get('/api/matches/:matchId/conversation', async (req, res) => {
 // -----------------------------------------------------------------------------------------------------
 // REPORT ENDPOINTS:
 // -----------------------------------------------------------------------------------------------------
-// 1. Report a user
-app.post('/api/report', async (req, res) => {
-  const connection = await db.connect();
-  try {
-    const { reporterID, reportedID, reason } = req.body;
-
-    // Validate input
-    if (!reporterID || !reportedID || !reason) {
-      return res.status(400).json({ error: 'ReporterID, reportedID, and reason are required' });
-    }
-
-    if (reporterID === reportedID) {
-      return res.status(400).json({ error: 'Cannot report yourself' });
-    }
-
-    // Check if user has already reported this person
-    const [existing] = await connection.execute(
-      `SELECT ID FROM UserReports WHERE ReporterID = ? AND ReportedID = ?`,
-      [reporterID, reportedID]
-    );
-
-    if (existing.length > 0) {
-      return res.status(400).json({ error: 'You have already reported this user' });
-    }
-
-    // Insert report record
-    await connection.execute(
-      `INSERT INTO UserReports (ReporterID, ReportedID, Reason, Status, DateCreated) 
-       VALUES (?, ?, ?, 'Pending', NOW())`,
-      [reporterID, reportedID, reason]
-    );
-
-    res.json({ message: 'User reported successfully' });
-
-  } catch (err) {
-    console.error('Error reporting user:', err);
-    res.status(500).json({ error: 'Failed to report user' });
-  } finally {
-    await connection.end();
-  }
-});
-
-// 2. Get reports for admin (paginated)
+// 1. Get all reports for admin (simplified - no pagination)
 app.get('/api/admin/reports', async (req, res) => {
   const connection = await db.connect();
-  const page = parseInt(req.query.page) || 1;
-  const limit = parseInt(req.query.limit) || 20;
-  const offset = (page - 1) * limit;
-  const status = req.query.status || 'all'; // 'all', 'Pending', 'Reviewed', 'Dismissed'
-  
   try {
-    let statusFilter = '';
-    let queryParams = [limit, offset];
-    
-    if (status !== 'all') {
-      statusFilter = 'WHERE ur.Status = ?';
-      queryParams = [status, limit, offset];
-    }
-
-    // Get reports with user details
     const [reports] = await connection.execute(
       `SELECT 
         ur.ID as reportId,
         ur.Reason,
         ur.Status,
-        ur.DateCreated as reportDate,
+        ur.DateCreated,
         ur.DateReviewed,
         reporter.ID as reporterID,
         reporter.Username as reporterName,
@@ -1331,65 +1283,21 @@ app.get('/api/admin/reports', async (req, res) => {
         reported.Username as reportedName,
         reported.Email as reportedEmail,
         reported.Active as reportedActive,
-        reported.Verified as reportedVerified,
-        rp.Picture as reportedPicture
+        admin.Username as reviewedByAdmin
       FROM UserReports ur
       JOIN User reporter ON ur.ReporterID = reporter.ID
       JOIN User reported ON ur.ReportedID = reported.ID
-      LEFT JOIN Pictures rp ON rp.UserID = reported.ID AND rp.IsProfilePicture = TRUE
-      ${statusFilter}
-      ORDER BY ur.DateCreated DESC
-      LIMIT ? OFFSET ?`,
-      queryParams
+      LEFT JOIN User admin ON ur.ReviewedByAdminID = admin.ID
+      ORDER BY 
+        CASE ur.Status 
+          WHEN 'Pending' THEN 1 
+          WHEN 'Reviewed' THEN 2 
+          WHEN 'Dismissed' THEN 3 
+        END,
+        ur.DateCreated DESC`
     );
 
-    // Get total count for pagination
-    let countQuery = 'SELECT COUNT(*) as total FROM UserReports ur';
-    let countParams = [];
-    
-    if (status !== 'all') {
-      countQuery += ' WHERE ur.Status = ?';
-      countParams = [status];
-    }
-    
-    const [countResult] = await connection.execute(countQuery, countParams);
-    const totalReports = countResult[0].total;
-    const totalPages = Math.ceil(totalReports / limit);
-
-    const formattedReports = reports.map(report => ({
-      reportId: report.reportId,
-      reason: report.Reason,
-      status: report.Status,
-      reportDate: report.reportDate,
-      dateReviewed: report.DateReviewed,
-      reporter: {
-        id: report.reporterID,
-        name: report.reporterName,
-        email: report.reporterEmail
-      },
-      reported: {
-        id: report.reportedID,
-        name: report.reportedName,
-        email: report.reportedEmail,
-        active: report.reportedActive,
-        verified: report.reportedVerified,
-        picture: report.reportedPicture 
-          ? (report.reportedPicture.startsWith('http') 
-              ? report.reportedPicture 
-              : `http://localhost:3000${report.reportedPicture}`)
-          : null
-      }
-    }));
-
-    res.json({
-      reports: formattedReports,
-      pagination: {
-        currentPage: page,
-        totalPages: totalPages,
-        totalReports: totalReports,
-        limit: limit
-      }
-    });
+    res.json(reports);
 
   } catch (err) {
     console.error('Error fetching reports:', err);
@@ -1399,31 +1307,28 @@ app.get('/api/admin/reports', async (req, res) => {
   }
 });
 
-// 3. Update report status (admin action)
-app.put('/api/admin/reports/:reportId', async (req, res) => {
+// 2. Update report status
+app.put('/api/admin/reports/:reportId/status', async (req, res) => {
   const reportId = req.params.reportId;
-  const { status, adminID } = req.body; // status: 'Reviewed' or 'Dismissed'
   const connection = await db.connect();
-  
   try {
+    const { status, adminId } = req.body;
+
     // Validate status
-    if (!['Reviewed', 'Dismissed'].includes(status)) {
-      return res.status(400).json({ error: 'Invalid status. Must be Reviewed or Dismissed' });
+    if (!['Pending', 'Reviewed', 'Dismissed'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
     }
 
-    // Update report status
-    const [result] = await connection.execute(
+    await connection.execute(
       `UPDATE UserReports 
-       SET Status = ?, DateReviewed = NOW(), ReviewedByAdminID = ?
+       SET Status = ?, 
+           DateReviewed = NOW(), 
+           ReviewedByAdminID = ?
        WHERE ID = ?`,
-      [status, adminID || null, reportId]
+      [status, adminId, reportId]
     );
 
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: 'Report not found' });
-    }
-
-    res.json({ message: `Report marked as ${status.toLowerCase()}` });
+    res.json({ message: 'Report status updated successfully' });
 
   } catch (err) {
     console.error('Error updating report status:', err);
@@ -1433,56 +1338,63 @@ app.put('/api/admin/reports/:reportId', async (req, res) => {
   }
 });
 
-// 4. Get report statistics for admin dashboard
-app.get('/api/admin/reports/stats', async (req, res) => {
+// 3. Delete report
+app.delete('/api/admin/reports/:reportId', async (req, res) => {
+  const reportId = req.params.reportId;
   const connection = await db.connect();
-  
   try {
-    // Get counts by status
-    const [statusCounts] = await connection.execute(
-      `SELECT 
-        Status,
-        COUNT(*) as count
-      FROM UserReports
-      GROUP BY Status`
+    const [result] = await connection.execute(
+      `DELETE FROM UserReports WHERE ID = ?`,
+      [reportId]
     );
 
-    // Get recent reports count (last 7 days)
-    const [recentCount] = await connection.execute(
-      `SELECT COUNT(*) as count
-      FROM UserReports
-      WHERE DateCreated >= DATE_SUB(NOW(), INTERVAL 7 DAY)`
-    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
 
-    // Get most reported users
-    const [mostReported] = await connection.execute(
-      `SELECT 
-        u.ID,
-        u.Username,
-        u.Email,
-        COUNT(ur.ID) as reportCount
-      FROM UserReports ur
-      JOIN User u ON ur.ReportedID = u.ID
-      WHERE ur.Status = 'Pending'
-      GROUP BY u.ID, u.Username, u.Email
-      ORDER BY reportCount DESC
-      LIMIT 5`
-    );
-
-    const stats = {
-      statusCounts: statusCounts.reduce((acc, curr) => {
-        acc[curr.Status] = curr.count;
-        return acc;
-      }, {}),
-      recentReports: recentCount[0].count,
-      mostReportedUsers: mostReported
-    };
-
-    res.json(stats);
+    res.json({ message: 'Report deleted successfully' });
 
   } catch (err) {
-    console.error('Error fetching report statistics:', err);
-    res.status(500).json({ error: 'Failed to fetch report statistics' });
+    console.error('Error deleting report:', err);
+    res.status(500).json({ error: 'Failed to delete report' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// 4. Submit a report (keep your existing one if it works, or use this)
+app.post('/api/reports', async (req, res) => {
+  const connection = await db.connect();
+  try {
+    const { reporterId, reportedId, reason } = req.body;
+
+    // Validate input
+    if (!reporterId || !reportedId || !reason) {
+      return res.status(400).json({ error: 'Reporter ID, reported ID, and reason are required' });
+    }
+
+    // Check if user has already reported this person
+    const [existing] = await connection.execute(
+      `SELECT ID FROM UserReports WHERE ReporterID = ? AND ReportedID = ?`,
+      [reporterId, reportedId]
+    );
+
+    if (existing.length > 0) {
+      return res.status(400).json({ error: 'You have already reported this user' });
+    }
+
+    // Insert report
+    await connection.execute(
+      `INSERT INTO UserReports (ReporterID, ReportedID, Reason, Status, DateCreated) 
+       VALUES (?, ?, ?, 'Pending', NOW())`,
+      [reporterId, reportedId, reason]
+    );
+
+    res.json({ message: 'Report submitted successfully' });
+
+  } catch (err) {
+    console.error('Error submitting report:', err);
+    res.status(500).json({ error: 'Failed to submit report' });
   } finally {
     await connection.end();
   }
