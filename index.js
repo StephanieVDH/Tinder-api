@@ -176,6 +176,97 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+// Update user location coordinates
+app.put('/api/profile/:id/location', async (req, res) => {
+  const userId = req.params.id;
+  const connection = await db.connect();
+  
+  try {
+    const { latitude, longitude } = req.body;
+
+    // Validate input
+    if (latitude === undefined || longitude === undefined) {
+      return res.status(400).json({ error: 'Latitude and longitude are required' });
+    }
+
+    // Validate coordinate ranges
+    if (latitude < -90 || latitude > 90) {
+      return res.status(400).json({ error: 'Latitude must be between -90 and 90' });
+    }
+
+    if (longitude < -180 || longitude > 180) {
+      return res.status(400).json({ error: 'Longitude must be between -180 and 180' });
+    }
+
+    // Check if user exists
+    const [userCheck] = await connection.execute(
+      'SELECT ID FROM User WHERE ID = ?',
+      [userId]
+    );
+
+    if (userCheck.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Update user's location
+    await connection.execute(
+      `UPDATE User 
+       SET Latitude = ?, 
+           Longitude = ?,
+           UpdatedAt = CURRENT_TIMESTAMP
+       WHERE ID = ?`,
+      [latitude, longitude, userId]
+    );
+
+    res.json({ 
+      message: 'Location updated successfully',
+      coordinates: {
+        latitude: latitude,
+        longitude: longitude
+      }
+    });
+
+  } catch (err) {
+    console.error('Error updating location:', err);
+    res.status(500).json({ error: 'Failed to update location' });
+  } finally {
+    await connection.end();
+  }
+});
+
+// Get user's current location
+app.get('/api/profile/:id/location', async (req, res) => {
+  const userId = req.params.id;
+  const connection = await db.connect();
+  
+  try {
+    const [locationRows] = await connection.execute(
+      'SELECT Latitude, Longitude FROM User WHERE ID = ?',
+      [userId]
+    );
+
+    if (locationRows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const user = locationRows[0];
+    
+    res.json({
+      hasLocation: !!(user.Latitude && user.Longitude),
+      coordinates: {
+        latitude: user.Latitude,
+        longitude: user.Longitude
+      }
+    });
+
+  } catch (err) {
+    console.error('Error fetching location:', err);
+    res.status(500).json({ error: 'Failed to fetch location' });
+  } finally {
+    await connection.end();
+  }
+});
+
 // 3. User profile page
 // 1. Get user profile by ID
 app.get('/api/profile/:id', async (req, res) => {
@@ -237,8 +328,6 @@ app.get('/api/profile/:id', async (req, res) => {
   }
 });
 
-// Add these endpoints to your index.js file after the existing profile endpoints
-
 // 1. Get all pictures for a user (ADD THIS NEW ENDPOINT)
 app.get('/api/pictures/:userId', async (req, res) => {
   const userId = req.params.userId;
@@ -276,7 +365,7 @@ app.get('/api/pictures/:userId', async (req, res) => {
   }
 });
 
-// 2. Delete a specific picture (ADD THIS NEW ENDPOINT)
+// 2. Delete a specific picture
 app.delete('/api/pictures/:pictureId', async (req, res) => {
   const pictureId = req.params.pictureId;
   const connection = await db.connect();
@@ -316,10 +405,7 @@ app.delete('/api/pictures/:pictureId', async (req, res) => {
   }
 });
 
-// 3. REPLACE your existing profile update endpoint with this updated version:
-// Find this line in your code: app.put('/api/profile/:id', upload.single('profilePicture'), async (req, res) => {
-// And replace the entire endpoint with this updated version:
-
+// 3. Update profile
 app.put('/api/profile/:id', upload.fields([
   { name: 'profilePicture', maxCount: 1 },
   { name: 'additionalPictures', maxCount: 5 }
@@ -532,7 +618,7 @@ app.put('/api/preferences/:id', async (req, res) => {
         `INSERT INTO UserPreferences 
          (UserID, MaxDistance, MinAge, MaxAge) 
          VALUES (?, ?, ?, ?)`,
-        [userId, MaxDistance || 50, MinAge || 18, MaxAge || 99]
+        [userId, MaxDistance || 75, MinAge || 18, MaxAge || 99]
       );
     }
 
@@ -1647,7 +1733,9 @@ app.put('/api/admin/users/:id/verify', async (req, res) => {
 app.delete('/api/admin/users/:id', async (req, res) => {
   const userId = req.params.id;
   const connection = await db.connect();
+  
   try {
+    // With CASCADE, we only need to delete the user - everything else is automatic
     const [result] = await connection.execute(
       'DELETE FROM User WHERE ID = ?',
       [userId]
@@ -1657,9 +1745,10 @@ app.delete('/api/admin/users/:id', async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    res.json({ message: 'User deleted' });
+    res.json({ message: 'User deleted successfully' });
+
   } catch (err) {
-    console.error(err);
+    console.error('Error deleting user:', err);
     res.status(500).json({ error: 'Failed to delete user' });
   } finally {
     await connection.end();
