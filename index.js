@@ -567,7 +567,7 @@ app.get('/api/preferences/:id', async (req, res) => {
       // Return default preferences if none exist
       res.json({
         selectedGenders: [],
-        MaxDistance: 50,
+        MaxDistance: 75,
         MinAge: 18,
         MaxAge: 99
       });
@@ -610,7 +610,7 @@ app.put('/api/preferences/:id', async (req, res) => {
              MinAge = ?,
              MaxAge = ?
          WHERE UserID = ?`,
-        [MaxDistance || 50, MinAge || 18, MaxAge || 99, userId]
+        [MaxDistance || 75, MinAge || 18, MaxAge || 99, userId]
       );
     } else {
       // Insert new basic preferences
@@ -762,7 +762,7 @@ app.get('/api/users/swipe/:id', async (req, res) => {
     });
 
     // Calculate distances and filter by MaxDistance preference
-    const maxDistance = userPrefs.length > 0 ? (userPrefs[0].MaxDistance || 50) : 50;
+    const maxDistance = userPrefs.length > 0 ? (userPrefs[0].MaxDistance || 75) : 75;
     
     const usersWithDistance = userRows.map(user => {
       // Calculate distance using Haversine formula

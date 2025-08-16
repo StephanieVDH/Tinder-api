@@ -59,7 +59,7 @@ CREATE TABLE Pictures (
     Picture TEXT NOT NULL,
     UserID INT,
     IsProfilePicture BOOLEAN DEFAULT FALSE,
-    FOREIGN KEY (UserID) REFERENCES `User`(ID)
+    FOREIGN KEY (UserID) REFERENCES `User`(ID) ON DELETE CASCADE
 );
 
 -- ===================
@@ -73,8 +73,8 @@ CREATE TABLE Swipe (
     SwipedID INT NOT NULL,
     Liked BOOLEAN NOT NULL,
     UNIQUE (SwiperID, SwipedID),
-    FOREIGN KEY (SwiperID) REFERENCES `User`(ID),
-    FOREIGN KEY (SwipedID) REFERENCES `User`(ID)
+    FOREIGN KEY (SwiperID) REFERENCES `User`(ID) ON DELETE CASCADE,
+    FOREIGN KEY (SwipedID) REFERENCES `User`(ID) ON DELETE CASCADE
 );
 
 -- ===================
@@ -86,8 +86,8 @@ CREATE TABLE `Match` (
     DateCreated DATETIME DEFAULT CURRENT_TIMESTAMP,
     User1ID INT NOT NULL,
     User2ID INT NOT NULL,
-    FOREIGN KEY (User1ID) REFERENCES `User`(ID),
-    FOREIGN KEY (User2ID) REFERENCES `User`(ID)
+    FOREIGN KEY (User1ID) REFERENCES `User`(ID) ON DELETE CASCADE,
+    FOREIGN KEY (User2ID) REFERENCES `User`(ID) ON DELETE CASCADE
 );
 
 -- ===================
@@ -98,7 +98,7 @@ CREATE TABLE Conversation (
     ID INT PRIMARY KEY AUTO_INCREMENT,
     MatchID INT NOT NULL,
     DateCreated DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (MatchID) REFERENCES `Match`(ID)
+    FOREIGN KEY (MatchID) REFERENCES `Match`(ID) ON DELETE CASCADE
 );
 
 CREATE TABLE Messages (
@@ -107,8 +107,8 @@ CREATE TABLE Messages (
     SenderID INT NOT NULL,
     Timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
     Content TEXT NOT NULL,
-    FOREIGN KEY (ConversationID) REFERENCES Conversation(ID),
-    FOREIGN KEY (SenderID) REFERENCES `User`(ID)
+    FOREIGN KEY (ConversationID) REFERENCES Conversation(ID) ON DELETE CASCADE,
+    FOREIGN KEY (SenderID) REFERENCES `User`(ID) ON DELETE CASCADE
 );
 
 -- ===================
@@ -119,7 +119,7 @@ CREATE TABLE PreferredGender (
     ID INT PRIMARY KEY AUTO_INCREMENT,
     UserID INT NOT NULL,
     GenderID INT NOT NULL,
-    FOREIGN KEY (UserID) REFERENCES `User`(ID),
+    FOREIGN KEY (UserID) REFERENCES `User`(ID) ON DELETE CASCADE,
     FOREIGN KEY (GenderID) REFERENCES Gender(ID)
 );
 
@@ -127,7 +127,7 @@ CREATE TABLE LookingFor (
     ID INT PRIMARY KEY AUTO_INCREMENT,
     UserID INT NOT NULL,
     RelationshipTypeID INT NOT NULL,
-    FOREIGN KEY (UserID) REFERENCES `User`(ID),
+    FOREIGN KEY (UserID) REFERENCES `User`(ID) ON DELETE CASCADE,
     FOREIGN KEY (RelationshipTypeID) REFERENCES RelationshipTypes(ID)
 );
 
@@ -139,7 +139,7 @@ CREATE TABLE UserPreferences (
     MinAge INT DEFAULT 18,
     MaxAge INT DEFAULT 99,
     CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (UserID) REFERENCES `User`(ID),
+    FOREIGN KEY (UserID) REFERENCES `User`(ID) ON DELETE CASCADE,
     FOREIGN KEY (GenderID) REFERENCES Gender(ID)
 );
 
@@ -154,8 +154,8 @@ CREATE TABLE AdminActions (
     ActionTypeID INT NOT NULL,
     DateCreated DATETIME DEFAULT CURRENT_TIMESTAMP,
     Reason TEXT,
-    FOREIGN KEY (AdminID) REFERENCES `User`(ID),
-    FOREIGN KEY (UserID) REFERENCES `User`(ID),
+    FOREIGN KEY (AdminID) REFERENCES `User`(ID) ON DELETE CASCADE,
+    FOREIGN KEY (UserID) REFERENCES `User`(ID) ON DELETE CASCADE,
     FOREIGN KEY (ActionTypeID) REFERENCES AdminActionTypes(ID)
 );
 
@@ -169,8 +169,8 @@ CREATE TABLE BlockedUsers (
     BlockedID INT NOT NULL,
     DateCreated DATETIME DEFAULT CURRENT_TIMESTAMP,
     Reason TEXT,
-    FOREIGN KEY (BlockerID) REFERENCES `User`(ID),
-    FOREIGN KEY (BlockedID) REFERENCES `User`(ID)
+    FOREIGN KEY (BlockerID) REFERENCES `User`(ID) ON DELETE CASCADE,
+    FOREIGN KEY (BlockedID) REFERENCES `User`(ID) ON DELETE CASCADE
 );
 
 -- ===================
@@ -182,7 +182,7 @@ CREATE TABLE Session (
     UserID INT NOT NULL,
     Token VARCHAR(255) NOT NULL,
     ExpiryDate DATETIME,
-    FOREIGN KEY (UserID) REFERENCES `User`(ID)
+    FOREIGN KEY (UserID) REFERENCES `User`(ID) ON DELETE CASCADE
 );
 
 -- ===================
@@ -194,7 +194,7 @@ CREATE TABLE UserActivity (
     UserID INT NOT NULL,
     Action ENUM('Login', 'Swipe', 'Match', 'MessageSent') NOT NULL,
     Timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (UserID) REFERENCES `User`(ID)
+    FOREIGN KEY (UserID) REFERENCES `User`(ID) ON DELETE CASCADE
 );
 
 -- ===================
@@ -210,8 +210,9 @@ CREATE TABLE UserReports (
     DateCreated DATETIME DEFAULT CURRENT_TIMESTAMP,
     DateReviewed DATETIME NULL,
     ReviewedByAdminID INT NULL,
-    FOREIGN KEY (ReporterID) REFERENCES `User`(ID),
-    FOREIGN KEY (ReportedID) REFERENCES `User`(ID),
-    FOREIGN KEY (ReviewedByAdminID) REFERENCES `User`(ID),
+    FOREIGN KEY (ReporterID) REFERENCES `User`(ID) ON DELETE CASCADE,
+    FOREIGN KEY (ReportedID) REFERENCES `User`(ID) ON DELETE CASCADE,
+    -- Note: Using SET NULL for ReviewedByAdminID so reports remain if admin is deleted
+    FOREIGN KEY (ReviewedByAdminID) REFERENCES `User`(ID) ON DELETE SET NULL,
     UNIQUE KEY unique_report (ReporterID, ReportedID)
 );
